@@ -8,6 +8,10 @@ import { receiveFile, scanFile, commitFile, stagedFile, discardStagedFile } from
 import { createSession, serveStream } from './stream.js';
 import { normalizeImage, coverColor, customPath } from './audio.js';
 import { shutdown as closeBrowser } from './tiktok.js';
+import { previewLink, downloadLink, linkPreviewCover, searchSpotifyLink } from './link-import.js';
+import { clipInfo, setClip, serveClipSource } from './clips.js';
+import { TRACK_ID_RE } from '../shared/media-link.js';
+import { createExport, exportJob, recentExports, exportReport, serveExport } from './exports.js';
 
 const PORT = Number(process.env.PORT || 8788);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -38,7 +42,7 @@ const readJSON = async (req, limit = 5 << 20) => {
   } catch { throw Object.assign(new Error('Expected a JSON object'), { code: 400 }); }
 };
 const trackIdsInput = (ids = []) => {
-  if (!Array.isArray(ids) || ids.length > 20000 || ids.some((id) => typeof id !== 'string' || !/^(?:\d{1,22}|file-[a-f0-9]{64})$/.test(id)))
+  if (!Array.isArray(ids) || ids.length > 20000 || ids.some((id) => typeof id !== 'string' || !TRACK_ID_RE.test(id)))
     throw Object.assign(new Error('Invalid song list'), { code: 400 });
   return [...new Set(ids)];
 };
@@ -52,6 +56,7 @@ function trackOut(t) {
     cover: t.custom_cover ? mediaUrl('c', t.custom_cover, t.ver) : t.cover_file ? mediaUrl('t', t.cover_file, t.ver) : null,
     customCover: !!t.custom_cover,
     origin: t.origin, filename: t.original_name || '',
+    clipped: t.clip_start !== null, clipStart: (t.clip_start ?? 0)/48000, clipEnd: t.clip_end === null ? null : t.clip_end/48000, originalDuration: (t.base_samples ?? t.samples)/48000,
   };
 }
 
@@ -115,6 +120,35 @@ route('POST', '/api/login', async (req, res) => {
 route('POST', '/api/logout', (req, res) => { logout(req, res); send(res, 200, { ok: true }); }, { open: true });
 
 route('GET', '/api/library', (req, res) => send(res, 200, library()));
+route('POST', '/api/exports', async (req, res) => send(res, 200, createExport(await readJSON(req))));
+route('GET', '/api/exports', (req, res) => send(res, 200, { jobs: recentExports() }));
+route('GET', '/api/exports/:id', (req, res, { id }) => { const job=exportJob(id); return job ? send(res,200,job) : fail(res,404,'Download not found'); });
+route('GET', '/api/exports/:id/file', (req,res,{id}) => serveExport(req,res,id));
+route('HEAD', '/api/exports/:id/file', (req,res,{id}) => serveExport(req,res,id));
+route('GET', '/api/exports/:id/report', (req,res,{id}) => send(res,200,exportReport(id)));
+
+route('POST', '/api/links/resolve', async (req,res) => { const {link}=await readJSON(req,10000);send(res,200,await previewLink(link)); });
+route('POST', '/api/links/download', async (req,res) => { const {token}=await readJSON(req,10000);send(res,200,downloadLink(token)); });
+route('POST', '/api/links/spotify/search', async (req,res) => { const {token}=await readJSON(req,10000);send(res,200,await searchSpotifyLink(token)); });
+route('GET', '/api/links/previews/:token/cover', async (req,res,{token}) => {
+  const image=await linkPreviewCover(token);if(!image)return fail(res,404,'Cover unavailable');
+  res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, no-store','Content-Length':image.length});res.end(image);
+});
+route('POST', '/api/tiktok/resolve', async (req, res) => {
+  const { link } = await readJSON(req, 10_000);
+  send(res, 200, await previewLink(link));
+});
+route('POST', '/api/tiktok/download', async (req, res) => {
+  const { token } = await readJSON(req, 10_000);
+  send(res, 200, downloadLink(token));
+});
+route('GET', '/api/tiktok/previews/:token/cover', async (req, res, { token }) => {
+  const image = await linkPreviewCover(token);
+  if (!image) return fail(res, 404, 'Cover unavailable');
+  res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, no-store', 'Content-Length': image.length });
+  res.end(image);
+});
+
 route('POST', '/api/files/scan', async (req, res) => send(res, 200, await scanFile(req)));
 route('GET', '/api/files/staged/:token/cover', (req, res, { token }) => {
   const stage = stagedFile(token);
@@ -135,15 +169,24 @@ route('POST', '/api/files', async (req, res) => {
   const job = startFileJob(file.trackId, file.playlistId);
   send(res, 200, { ...file, jobId: job.id });
 });
+route('GET', '/api/tracks/:id/clip', async (req,res,{id}) => send(res,200,await clipInfo(id)));
+route('PATCH', '/api/tracks/:id/clip', async (req,res,{id}) => send(res,200,setClip(id,await readJSON(req,10000))));
+route('GET', '/api/tracks/:id/source', (req,res,{id}) => serveClipSource(req,res,id));
+route('HEAD', '/api/tracks/:id/source', (req,res,{id}) => serveClipSource(req,res,id));
 route('PATCH', '/api/tracks/:id', async (req, res, { id }) => {
-  const t = db.prepare('SELECT origin,title,author FROM tracks WHERE id=?').get(id);
+  const t = db.prepare('SELECT title,author FROM tracks WHERE id=?').get(id);
   if (!t) return fail(res, 404, 'Song not found');
-  if (t.origin !== 'external') return fail(res, 400, 'Only file titles and authors can be edited');
   const b = await readJSON(req);
-  const title = typeof b.title === 'string' ? b.title.trim().slice(0, 300) : t.title;
+  const hasTitle = b.title !== undefined, hasAuthor = b.author !== undefined;
+  if ((!hasTitle && !hasAuthor) || (hasTitle && typeof b.title !== 'string') || (hasAuthor && typeof b.author !== 'string'))
+    return fail(res, 400, 'Enter a song title or author');
+  const title = hasTitle ? b.title.trim().slice(0, 300) : t.title;
   const author = typeof b.author === 'string' ? b.author.trim().slice(0, 200) : t.author;
   if (!title) return fail(res, 400, 'Enter a title');
-  db.prepare('UPDATE tracks SET title=?,author=?,ver=ver+1 WHERE id=?').run(title, author, id);
+  db.prepare(`UPDATE tracks SET title=?,author=?,
+    title_override=CASE WHEN ? THEN ? ELSE title_override END,
+    author_override=CASE WHEN ? THEN ? ELSE author_override END,ver=ver+1 WHERE id=?`)
+    .run(title, author, hasTitle ? 1 : 0, title, hasAuthor ? 1 : 0, author, id);
   send(res, 200, { ok: true });
 });
 

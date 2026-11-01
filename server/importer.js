@@ -4,6 +4,8 @@ import { db, uid, tx, DIRS } from './db.js';
 import { soundInfo, download, SoundError } from './tiktok.js';
 import { analyze, normalizeImage, coverColor, coverPath, audioPath } from './audio.js';
 import { processExternalTrack } from './external.js';
+import { analysisWithClip } from './clips.js';
+import { processMediaTrack } from './media-sites.js';
 
 const jobs = new Map();
 const inFlight = new Map();
@@ -50,6 +52,8 @@ export function startFileJob(trackId, playlistId) {
   if (existing) return existing;
   return startJob(playlistId, [trackId], 'Мои файлы', 'external');
 }
+
+export const startLinkJob = (trackId, playlistId, name) => startJob(playlistId, [trackId], name, 'link');
 
 function startJob(playlistId, ids, name, kind = 'tiktok') {
   const job = { id: uid(), playlistId, name, kind, total: ids.length, done: 0, ok: 0, failed: 0, reused: 0, finished: false, items: {}, started: Date.now() };
@@ -111,13 +115,14 @@ async function processTrack(id) {
   const existing = db.prepare('SELECT status, audio_file, origin FROM tracks WHERE id = ?').get(id);
   if (existing?.status === 'ok' && existing.audio_file && fs.existsSync(audioPath(existing.audio_file))) return true;
   if (existing?.origin === 'external') return processExternalTrack(id);
+  if (['youtube','soundcloud'].includes(existing?.origin)) return processMediaTrack(id);
   let info;
   for (let attempt = 0; attempt < 2; attempt++) {
     try { info = await soundInfo(id); break; }
     catch (e) { if (!e.retryable || attempt === 1) throw e; }
   }
   // Save useful metadata even if the CDN download fails.
-  db.prepare('UPDATE tracks SET title = ?, author = ? WHERE id = ?').run(info.title, info.author, id);
+  db.prepare('UPDATE tracks SET title = COALESCE(title_override, ?), author = COALESCE(author_override, ?) WHERE id = ?').run(info.title, info.author, id);
   const tmp = path.join(DIRS.tmp, `${id}-${uid()}`);
   let a, audioFile;
   try {
@@ -138,9 +143,10 @@ async function processTrack(id) {
       color = await coverColor(coverPath(coverFile));
     } catch { coverFile = null; } finally { fs.rmSync(ctmp, { force: true }); }
   }
-  db.prepare(`UPDATE tracks SET status = 'ok', error = NULL, title = ?, author = ?, samples = ?, trim_start = ?, gain = ?,
-    audio_file = ?, cover_file = COALESCE(?, cover_file), color = ?, ver = ver + 1 WHERE id = ?`)
-    .run(info.title, info.author, a.samples, a.trimStart, a.gain, audioFile, coverFile, color, id);
+  a = analysisWithClip(id, a);
+  db.prepare(`UPDATE tracks SET status = 'ok', error = NULL, title = COALESCE(title_override, ?), author = COALESCE(author_override, ?), samples = ?, trim_start = ?, gain = ?,
+    audio_file = ?, cover_file = COALESCE(?, cover_file), color = ?, base_trim_start=?,base_samples=?,clip_start=?,clip_end=?, ver = ver + 1 WHERE id = ?`)
+    .run(info.title, info.author, a.samples, a.trimStart, a.gain, audioFile, coverFile, color, a.baseStart,a.baseSamples,a.clipStart,a.clipEnd, id);
   return false;
 }
 

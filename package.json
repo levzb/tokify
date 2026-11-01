@@ -12,19 +12,26 @@
     "start:background": "node scripts/start.mjs",
     "test:browser": "node tests/browser.mjs",
     "test:repeat": "node tests/repeat.mjs",
-    "test:files": "node tests/files-browser.mjs"
+    "test:files": "node tests/files-browser.mjs",
+    "test:links": "node tests/links-browser.mjs",
+    "test:downloads": "node tests/downloads-browser.mjs",
+    "offline": "node scripts/offline.mjs",
+    "test:offline": "node tests/offline-browser.mjs",
+    "setup:media": "node scripts/setup-media.mjs",
+    "test:media": "node tests/media-browser.mjs",
+    "test:clips": "node tests/clips-browser.mjs"
   },
   "engines": {
     "node": ">=22.13"
   },
   "dependencies": {
-    "playwright": "^1.64.1"
+    "playwright": "^1.64.1",
+    "fflate": "^0.8.3"
   },
   "devDependencies": {
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@sveltejs/vite-plugin-svelte": "^5.1.1",
-    "fflate": "^0.8.3",
     "svelte": "^5.57.3",
     "vite": "^6.4.5"
   }

@@ -6,6 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { db, tx, DIRS, uid } from './db.js';
 import { run, analyze, normalizeImage, coverColor, coverPath, audioPath } from './audio.js';
 import { SoundError } from './tiktok.js';
+import { analysisWithClip } from './clips.js';
 import { mediaFileError } from '../shared/media.js';
 
 export const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
@@ -90,6 +91,16 @@ export async function scanFile(req) {
   } catch (e) { discardStagedFile(token); throw e; }
 }
 
+// Both file uploads and TikTok links share the same pinned destination.
+export function ensureExternalPlaylist() {
+  let playlist = db.prepare("SELECT id,name FROM playlists WHERE kind='external'").get();
+  if (!playlist) {
+    playlist = { id: uid(), name: 'Мои файлы' };
+    db.prepare("INSERT INTO playlists (id,name,kind,created) VALUES (?,?,'external',?)").run(playlist.id, playlist.name, Date.now());
+  }
+  return playlist;
+}
+
 export function commitFile({ token, title, author }) {
   const stage = stagedFile(token);
   title = typeof title === 'string' ? title.trim().slice(0,300) : stage.title;
@@ -111,11 +122,7 @@ export function commitFile({ token, title, author }) {
   }
   let playlistId;
   tx(() => {
-    let playlist = db.prepare("SELECT id,name FROM playlists WHERE kind='external'").get();
-    if (!playlist) {
-      playlist = { id: uid(), name: 'Мои файлы' };
-      db.prepare("INSERT INTO playlists (id,name,kind,created) VALUES (?,?,'external',?)").run(playlist.id,playlist.name,Date.now());
-    }
+    const playlist = ensureExternalPlaylist();
     playlistId = playlist.id;
     db.prepare(`INSERT INTO tracks (id,link,title,author,status,source_name,added,origin,original_name,original_file,cover_file,color)
       VALUES (?, '', ?, ?, 'pending', ?, ?, 'external', ?, ?, ?, ?)
@@ -161,7 +168,8 @@ export async function processExternalTrack(id) {
     } catch { coverFile=null; }
     finally { fs.rmSync(tempCover,{force:true}); }
   }
-  db.prepare(`UPDATE tracks SET status='ok',error=NULL,samples=?,trim_start=?,gain=?,audio_file=?,cover_file=COALESCE(?,cover_file),color=?,original_file=NULL,ver=ver+1 WHERE id=?`)
-    .run(a.samples,a.trimStart,a.gain,audioFile,coverFile,color,id);
+  a=analysisWithClip(id,a);
+  db.prepare(`UPDATE tracks SET status='ok',error=NULL,samples=?,trim_start=?,gain=?,audio_file=?,cover_file=COALESCE(?,cover_file),color=?,original_file=NULL,base_trim_start=?,base_samples=?,clip_start=?,clip_end=?,ver=ver+1 WHERE id=?`)
+    .run(a.samples,a.trimStart,a.gain,audioFile,coverFile,color,a.baseStart,a.baseSamples,a.clipStart,a.clipEnd,id);
   fs.rmSync(src,{force:true});return false;
 }

@@ -1,4 +1,5 @@
 import { SR } from '../../shared/timeline.js';
+import { providerName } from '../../shared/media-link.js';
 
 export function clock(sec) {
   if (!Number.isFinite(sec) || sec < 0) sec = 0;
@@ -10,7 +11,7 @@ export function clock(sec) {
 }
 
 export const trackSec = (t) => (t?.samples || 0) / SR;
-export const artistName = (t) => t?.author || (t?.origin === 'external' ? 'Unknown artist' : 'TikTok');
+export const artistName = (t) => t?.author || (t?.origin === 'external' ? 'Unknown artist' : providerName(t?.origin || 'tiktok'));
 
 export const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 export const songs = (n) => plural(n, 'song');

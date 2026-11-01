@@ -12,6 +12,9 @@ export const ui = $state({
   fileImportSource: null,
   fileImportOpen: false,
   filesBusy: false,
+  downloadOpen: false,
+  downloadSource: null,
+  clipTrackId: null,
   libraryView: 'imports',
   search: '',
 });

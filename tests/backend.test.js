@@ -53,6 +53,13 @@ await test('backend, library, persistence and continuous audio', async (t) => {
     assert.equal((await request('/api/playlists', 'POST', {}, { Origin: 'https://evil.example' })).status, 403);
   });
   let playlist;
+  await t.test('TikTok link APIs require login and reject invalid links or expired previews', async () => {
+    const unauth = await fetch(base+'/api/tiktok/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({link:'https://www.tiktok.com/music/sound-123'})});
+    assert.equal(unauth.status,401);
+    assert.equal((await request('/api/tiktok/resolve','POST',{link:'https://example.com/video/123'})).status,400);
+    assert.equal((await request('/api/tiktok/resolve','POST',{link:'https://tiktok.com/@person'})).status,400);
+    assert.equal((await request('/api/tiktok/download','POST',{token:'expired'})).status,400);
+  });
   await t.test('create, rename, reorder, deduplicate and remove playlist membership', async () => {
     playlist = (await json('/api/playlists', 'POST', { name: 'Мои звуки 🎧', trackIds: ids })).id;
     assert.equal((await request(`/api/playlists/${playlist}`, 'PATCH', { trackIds: [ids[0]] })).status, 400);
@@ -167,7 +174,11 @@ await test('backend, library, persistence and continuous audio', async (t) => {
     assert.equal(l.playlists[0].trackIds.length, 1);
     await json('/api/tracks/' + fileTrack, 'PATCH', { title: 'После правки', author: '' });
     assert.equal((await json('/api/library')).tracks.find((t) => t.id === fileTrack).title, 'После правки');
-    assert.equal((await request('/api/tracks/' + ids[0], 'PATCH', { title: 'No' })).status, 400);
+    await json('/api/tracks/' + ids[0], 'PATCH', { title: 'My TikTok title', author: 'My artist' });
+    assert.equal((await json('/api/library')).tracks.find(t=>t.id===ids[0]).title,'My TikTok title');
+    assert.equal((await request('/api/tracks/' + ids[0], 'PATCH', { title: '  ' })).status,400);
+    assert.equal((await request('/api/tracks/' + ids[0], 'PATCH', { author: null })).status,400);
+    assert.equal((await request('/api/tracks/missing', 'PATCH', { title: 'Missing' })).status,404);
     await json(`/api/playlists/${playlist}/tracks`, 'POST', { trackIds: [fileTrack] });
     const all = (await json('/api/library')).playlists.find((p) => p.id === playlist).trackIds;
     await json('/api/playlists/' + playlist, 'PATCH', { trackIds: all.toReversed() });
@@ -213,6 +224,23 @@ await test('backend, library, persistence and continuous audio', async (t) => {
     assert.equal(track.title,'Из предпросмотра');assert.equal(track.author,'Автор превью');
     assert.ok(!fs.existsSync(path.join(data,'uploads',`stage-${preview.token}.json`)));
   });
+  await t.test('TikTok links share the existing external upload and reuse cached sounds without changing their origin', async () => {
+    const before = (await json('/api/library')).playlists.length;
+    const found = await json('/api/tiktok/resolve','POST',{link:`https://www.tiktok.com/music/sound-${ids[0]}`});
+    assert.equal(found.musicId,ids[0]);assert.equal(found.saved,false);assert.ok(found.token);
+    assert.equal((await json('/api/library')).playlists.length,before,'search must not create an upload');
+    const result = await json('/api/tiktok/download','POST',{token:found.token});
+    assert.equal(result.playlistId,filePlaylist);
+    assert.deepEqual(await json('/api/tiktok/download','POST',{token:found.token}),result,'same preview is idempotent');
+    let job;for(let i=0;i<50;i++){job=await json('/api/jobs/'+result.jobId);if(job.finished)break;await new Promise(r=>setTimeout(r,30));}
+    assert.equal(job.kind,'link');assert.equal(job.reused,1);assert.equal(job.failed,0);
+    const lib=await json('/api/library');assert.equal(lib.playlists.length,before);assert.equal(lib.playlists[0].id,filePlaylist);
+    assert.equal(lib.playlists[0].trackIds.filter(id=>id===ids[0]).length,1);
+    assert.equal(lib.tracks.find(t=>t.id===ids[0]).origin,'tiktok');
+    const saved=await json('/api/tiktok/resolve','POST',{link:`https://www.tiktok.com/music/sound-${ids[0]}`});
+    assert.equal(saved.saved,true);assert.equal(saved.playlistId,filePlaylist);
+    if(saved.cover){assert.equal((await fetch(base+saved.cover)).status,401);assert.equal((await request(saved.cover)).status,200);}
+  });
   await t.test('preview cover requires login; cancellation and expiration remove staged files', async () => {
     const r=await scan(path.join(data,'test-video.mp4'),'Cover.mp4');assert.equal(r.status,200);const preview=await r.json();assert.ok(preview.cover);
     assert.equal((await fetch(base+preview.cover)).status,401);
@@ -226,6 +254,36 @@ await test('backend, library, persistence and continuous audio', async (t) => {
     assert.equal((await request('/api/files/commit','POST',{token:expired.token})).status,400);
     assert.equal(fs.readdirSync(path.join(data,'uploads')).length,0);
     await stop();await boot();assert.equal((await json('/api/library')).playlists[0].id,filePlaylist);
+  });
+  await t.test('edited TikTok metadata survives a server restart and a reimport', async () => {
+    await json('/api/tracks/'+ids[0],'PATCH',{author:''});
+    await stop();await boot();
+    let track=(await json('/api/library')).tracks.find(t=>t.id===ids[0]);
+    assert.equal(track.title,'My TikTok title');assert.equal(track.author,'');
+    const imported=await json('/api/imports','POST',{name:'Edited reimport',items:[{musicId:ids[0],title:'Original export title'}]});
+    for(let i=0;i<30;i++){const job=await json('/api/jobs/'+imported.jobId);if(job.finished)break;await new Promise(r=>setTimeout(r,30));}
+    track=(await json('/api/library')).tracks.find(t=>t.id===ids[0]);assert.equal(track.title,'My TikTok title');assert.equal(track.author,'');
+  });
+  await t.test('excerpt API keeps the original private and applies the range everywhere', async () => {
+    const url='/api/tracks/'+ids[0];assert.equal((await fetch(base+url+'/clip')).status,401);assert.equal((await fetch(base+url+'/source')).status,401);
+    const info=await json(url+'/clip');assert.equal(info.duration,8);assert.ok(info.waveform.length);
+    const partial=await request(url+'/source','GET',undefined,{Range:'bytes=0-99'});assert.equal(partial.status,206);assert.deepEqual(Buffer.from(await partial.arrayBuffer()),fs.readFileSync(path.join(data,'audio',ids[0]+'.wav')).subarray(0,100));
+    assert.equal((await request(url+'/source','HEAD')).status,200);assert.equal((await request(url+'/source','GET',undefined,{Range:'bytes=999999999-'})).status,416);
+    await json(url+'/clip','PATCH',{start:1.25,end:3.75,version:info.version});let track=(await json('/api/library')).tracks.find(t=>t.id===ids[0]);assert.equal(track.samples,120000);assert.equal(track.clipped,true);assert.equal(track.originalDuration,8);
+    await stop();await boot();assert.equal((await json(url+'/clip')).start,1.25);
+    assert.equal((await request(url+'/clip','PATCH',{start:0,end:.1})).status,400);await json(url+'/clip','PATCH',{reset:true});track=(await json('/api/library')).tracks.find(t=>t.id===ids[0]);assert.equal(track.samples,384000);assert.equal(track.clipped,false);
+  });
+  await t.test('offline export downloads require login, support ranges and stay on disk after restart', async () => {
+    assert.equal((await fetch(base+'/api/exports')).status,401);
+    const job=await json('/api/exports','POST',{trackIds:[ids[0]],format:'mix',mode:'crossfade'});
+    let ready;for(let i=0;i<200;i++){ready=await json('/api/exports/'+job.id);if(ready.status==='ready')break;assert.notEqual(ready.status,'error',ready.error);await new Promise(r=>setTimeout(r,30));}
+    assert.equal(ready.status,'ready');assert.equal((await fetch(base+ready.url)).status,401);
+    const full=await request(ready.url);assert.equal(full.status,200);assert.match(full.headers.get('content-disposition'),/attachment/);
+    const audio=Buffer.from(await full.arrayBuffer());assert.equal(audio.length,ready.bytes);
+    const range=await request(ready.url,'GET',undefined,{Range:'bytes=100-199'});assert.equal(range.status,206);assert.deepEqual(Buffer.from(await range.arrayBuffer()),audio.subarray(100,200));
+    assert.equal((await request(ready.url,'GET',undefined,{Range:'bytes=999999999-'})).status,416);
+    assert.equal((await request(ready.url,'HEAD')).headers.get('content-length'),String(audio.length));
+    assert.equal((await json(ready.reportUrl)).tracks.length,1);await stop();await boot();assert.equal((await json('/api/exports/'+job.id)).status,'ready');
   });
   await t.test('deleting playlists hides songs but preserves the private download cache', async () => {
     for (const p of (await json('/api/library')).playlists) await json('/api/playlists/' + p.id, 'DELETE');

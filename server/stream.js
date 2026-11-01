@@ -3,6 +3,9 @@
 // Chunks are encoded independently (CBR 160k @ 48 kHz, no bit reservoir, with pre/post roll),
 // so they join seamlessly and Safari can seek anywhere instantly.
 import { db } from './db.js';
+import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { run, decode, audioPath } from './audio.js';
 import { buildTimeline, envelope, SR, FRAME, FRAME_BYTES, entryAt } from '../shared/timeline.js';
 
@@ -57,7 +60,7 @@ const sessions = new Map();
 const waiters = new Map();
 const MAX_SESSIONS = 24;
 
-export function createSession(id, { items, mode }) {
+export function createSession(id, { items, mode }, { store = true } = {}) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw Object.assign(new Error('Invalid session ID'), { code: 400 });
   const rows = new Map();
   const q = db.prepare("SELECT id, samples, trim_start, gain, audio_file, ver FROM tracks WHERE id = ? AND status = 'ok'");
@@ -71,6 +74,7 @@ export function createSession(id, { items, mode }) {
   if (!plan.length) throw Object.assign(new Error('No playable songs'), { code: 400 });
   const tl = buildTimeline(plan, ['none', 'fade', 'crossfade'].includes(mode) ? mode : 'none');
   const s = { id, tl, tracks: rows, chunks: new Map(), pending: new Map(), created: Date.now() };
+  if (!store) return s;
   sessions.set(id, s);
   while (sessions.size > MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
   for (const w of [...(waiters.get(id) || [])]) w(s);
@@ -197,4 +201,33 @@ export async function serveStream(req, res, id) {
     return;
   }
   res.end();
+}
+
+
+/** Render the same continuous stream to disk; no network or browser is involved. */
+export async function renderMixFile(items, mode, file, onProgress = () => {}) {
+  const id = randomUUID();
+  const s = createSession(id, { items, mode }, { store: false });
+  const output = fs.createWriteStream(file);
+  let outputError;
+  output.on('error', (e) => { outputError = e; });
+  const chunks = Math.ceil(s.tl.bytes / CHUNK_BYTES);
+  try {
+    for (let c = 0; c < chunks; c++) {
+      if (outputError) throw outputError;
+      const buf = await chunk(s, c);
+      if (!output.write(buf)) await once(output, 'drain');
+      const pos = Math.min(s.tl.audioEnd, (c + 1) * K * FRAME);
+      let done = 0;
+      while (done < s.tl.entries.length && s.tl.entries[done].start + s.tl.entries[done].len <= pos) done++;
+      onProgress({ done, total: s.tl.entries.length, progress: (c + 1) / chunks });
+    }
+    output.end();
+    await once(output, 'finish');
+    return s.tl;
+  } catch (e) {
+    output.destroy();
+    fs.rmSync(file, { force: true });
+    throw e;
+  }
 }

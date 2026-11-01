@@ -201,6 +201,8 @@ export function playContext(cid, startId = null) {
   startSession(order[index], 0, true);
 }
 
+export function pausePlayback() { audio?.pause(); }
+
 export function toggle() {
   if (!player.trackId) return;
   if (!session) { startSession(player.trackId, restoredPos * SR, true); return; }
@@ -368,6 +370,24 @@ function finish() {
 }
 
 // ---------- media session (lock screen, headphones, Control Center) ----------
+/** A new excerpt changes the audio timeline even when track IDs stay the same. */
+export function trackAudioChanged(id) {
+  const affected = player.trackId === id || session?.entries.some((e)=>e.id===id);
+  if (affected && player.trackId) {
+    const pos=player.trackId===id ? 0 : Math.min(player.pos,(lib.tracks[player.trackId]?.samples || 0)/SR);
+    if (player.playing) startSession(player.trackId,Math.round(pos*SR),true);
+    else {
+      // Build the updated stream on the next Play tap. Loading a replacement
+      // stream while paused can race Safari's old media requests and navigation.
+      session=null;curIdx=-1;restoredPos=pos;
+      audio?.pause();audio?.removeAttribute('src');audio?.load();
+      player.pos=pos;player.dur=(lib.tracks[player.trackId]?.samples || 0)/SR;player.loading=false;
+      updateMetadata();persist();
+    }
+  }
+  computeUpNext();
+}
+
 export function trackDetailsChanged(id) { if (player.trackId === id) updateMetadata(); }
 function updateMetadata() {
   if (!('mediaSession' in navigator)) return;

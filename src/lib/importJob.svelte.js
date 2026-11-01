@@ -11,7 +11,7 @@ export async function startImport(name, items) {
 
 export async function restoreImport() {
   const { jobs } = await api('/api/jobs');
-  const job = jobs.find((j) => !j.finished && j.kind !== 'external');
+  const job = jobs.find((j) => !j.finished && j.kind !== 'external' && j.kind !== 'link');
   if (!job) return;
   ui.importJob = { ...job, jobId: job.id, order: Object.keys(job.items) };
   poll();

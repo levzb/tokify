@@ -1,5 +1,7 @@
 <script>
   import Icon from './Icon.svelte';
+  import LinkSearch from './LinkSearch.svelte';
+  import { openDownload } from '../lib/download.svelte.js';
   import Cover from './Cover.svelte';
   import TrackList from './TrackList.svelte';
   import SelectionActions from './SelectionActions.svelte';
@@ -70,6 +72,8 @@
   const jobFor = (pl) => (ui.importJob?.playlistId === pl.id && !ui.importJob.finished ? ui.importJob : null);
 </script>
 
+<LinkSearch />
+
 <section class="top">
   <div class="card tile drop" class:over class:has={!!picked} role="button" tabindex="0"
     onclick={() => !picked && !reading && fileInput.click()}
@@ -114,9 +118,12 @@
         <input type="search" placeholder="Search songs" bind:value={ui.search} aria-label="Search songs" />
         {#if ui.search}<button class="clear" aria-label="Clear" onclick={() => (ui.search = '')}><Icon name="x" size={14} /></button>{/if}
       </label>
+      <div class="view-tools">
+      <button class="icon-btn" aria-label="Download library" title="Download for offline listening" onclick={()=>openDownload({contextId:'all',name:'All songs'})}><Icon name="download" size={20}/></button>
       <div class="seg" role="tablist">
         <button role="tab" class:active={!showSongs} aria-selected={!showSongs} onclick={() => { ui.libraryView = 'imports'; ui.search = ''; selecting = false; }}>Uploads</button>
         <button role="tab" class:active={showSongs} aria-selected={showSongs} onclick={() => (ui.libraryView = 'songs')}>All songs</button>
+      </div>
       </div>
     </div>
   </div>
@@ -195,6 +202,7 @@
   .arrow { position: absolute; top: 30px; right: 30px; color: var(--muted); transition: transform .2s, color .2s; }
   .create:hover .arrow { transform: translateX(4px); color: #fff; }
 
+  .view-tools { display: flex; align-items: center; gap: 10px; }
   .tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .search {
     display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 12px 0 14px; width: 240px;

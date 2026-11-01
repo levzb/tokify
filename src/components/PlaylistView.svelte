@@ -1,5 +1,6 @@
 <script>
   import Icon from './Icon.svelte';
+  import { openDownload } from '../lib/download.svelte.js';
   import Cover from './Cover.svelte';
   import TrackList from './TrackList.svelte';
   import SelectionActions from './SelectionActions.svelte';
@@ -91,6 +92,7 @@
       {/each}
     </div>
     <div class="list-tools">
+      <button class="icon-btn" aria-label="Download playlist" title="Download for offline listening" onclick={()=>openDownload({contextId:id,name:pl.name})}><Icon name="download" size={20}/></button>
       {#if tracks.length}<SelectionActions bind:selecting bind:selected exceptId={id} mode="toggle" />{/if}
       <button class="icon-btn more" aria-label="Playlist menu" onclick={more}><Icon name="more" size={22} /></button>
     </div>

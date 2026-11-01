@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
 `);
 
 const trackColumns = new Set(db.prepare('PRAGMA table_info(tracks)').all().map((c) => c.name));
-for (const [name, definition] of [['origin', "TEXT NOT NULL DEFAULT 'tiktok'"], ['original_name', 'TEXT'], ['original_file', 'TEXT']]) {
+for (const [name, definition] of [['origin', "TEXT NOT NULL DEFAULT 'tiktok'"], ['original_name', 'TEXT'], ['original_file', 'TEXT'], ['title_override', 'TEXT'], ['author_override', 'TEXT'], ['base_trim_start', 'INTEGER'], ['base_samples', 'INTEGER'], ['clip_start', 'INTEGER'], ['clip_end', 'INTEGER']]) {
   if (!trackColumns.has(name)) db.exec(`ALTER TABLE tracks ADD COLUMN ${name} ${definition}`);
 }
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS one_external_upload ON playlists(kind) WHERE kind = 'external'");

@@ -17,6 +17,9 @@
   import Toast from './components/Toast.svelte';
   import ImportFlow from './components/ImportFlow.svelte';
   import FileImportFlow from './components/FileImportFlow.svelte';
+  import DownloadFlow from './components/DownloadFlow.svelte';
+  import ClipEditor from './components/ClipEditor.svelte';
+  import { restoreDownload } from './lib/download.svelte.js';
 
   let auth = $state('checking'); // checking | in | out
   setUnauthorizedHandler(() => { auth = 'out'; });
@@ -29,6 +32,7 @@
       await load();
       restore();
       await restoreImport();
+      restoreDownload();
     } catch { auth = 'out'; }
   }
   onMount(start);
@@ -68,6 +72,8 @@
   <QueuePanel />
   <ImportFlow />
   <FileImportFlow />
+  <DownloadFlow />
+  <ClipEditor />
   <ContextMenu />
   <Dialog />
   <Toast />
