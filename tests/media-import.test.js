@@ -1,4 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {spawnSync} from 'node:child_process';
+import { tool } from '../server/system.js';
+const FFMPEG = tool('ffmpeg');
 const data=fs.mkdtempSync(path.join(os.tmpdir(),'tokify-media-import-'));process.env.TOKIFY_DATA=data;
 const fake=path.join(data,'fake-dlp.mjs');process.env.TOKIFY_YTDLP=fake;
 fs.writeFileSync(fake,`#!/usr/bin/env node
@@ -8,8 +10,8 @@ if(bad){console.error('ERROR: This recording is unavailable');process.exit(1);}
 if(args.includes('--dump-single-json'))console.log(JSON.stringify({id:sc?'293':'jNQXAC9IVRw',title:sc?'My SoundCloud track':'My YouTube video',uploader:'My artist',duration:2,webpage_url:sc?'https://soundcloud.com/forss/flickermood':'https://www.youtube.com/watch?v=jNQXAC9IVRw',format_id:'audio'}));
 else {const file=args[args.indexOf('--output')+1].replace('%(ext)s','m4a');fs.copyFileSync(process.env.MEDIA_FIXTURE,file);fs.appendFileSync(process.env.MEDIA_COUNT,'audio\\n');}
 `,{mode:0o755});
-const{db}=await import('../server/db.js');const{setClip}=await import('../server/clips.js');const{previewLink,downloadLink}=await import('../server/link-import.js');const{jobStatus,retryTrack}=await import('../server/importer.js');
-const wav=path.join(data,'fixture.m4a');assert.equal(spawnSync('ffmpeg',['-v','error','-y','-f','lavfi','-i','sine=frequency=440:duration=2:sample_rate=48000','-c:a','aac','-ac','2',wav]).status,0);process.env.MEDIA_FIXTURE=wav;process.env.MEDIA_COUNT=path.join(data,'count.txt');
+const{db}=await import('../server/db.js');const{setClip}=await import('../server/audio.js');const{previewLink,downloadLink,jobStatus,retryTrack}=await import('../server/imports.js');
+const wav=path.join(data,'fixture.m4a');assert.equal(spawnSync(FFMPEG,['-v','error','-y','-f','lavfi','-i','sine=frequency=440:duration=2:sample_rate=48000','-c:a','aac','-ac','2',wav]).status,0);process.env.MEDIA_FIXTURE=wav;process.env.MEDIA_COUNT=path.join(data,'count.txt');
 async function finish(id){for(let i=0;i<200;i++){const j=jobStatus(id);if(j.finished)return j;await new Promise(r=>setTimeout(r,30));}throw Error('Media job timed out');}
 await test('YouTube and SoundCloud processing use one external playlist and preserve metadata on retry',async(t)=>{
  t.after(()=>{db.close();fs.rmSync(data,{recursive:true,force:true});});let playlist;

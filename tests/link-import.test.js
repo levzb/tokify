@@ -5,14 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawnSync } from 'node:child_process';
+import { tool } from '../server/system.js';
+const FFMPEG = tool('ffmpeg');
 const data = fs.mkdtempSync(path.join(os.tmpdir(), 'tokify-links-'));
 process.env.TOKIFY_DATA = data;
 const { db } = await import('../server/db.js');
-const { previewLink, downloadLink, linkPreviewCover } = await import('../server/link-import.js');
-const { jobStatus, retryTrack } = await import('../server/importer.js');
+const { previewLink, downloadLink, linkPreviewCover, jobStatus, retryTrack } = await import('../server/imports.js');
 const fixture = path.join(data, 'fixture.wav');
-assert.equal(spawnSync('ffmpeg',['-v','error','-y','-f','lavfi','-i','sine=frequency=330:duration=2:sample_rate=48000','-ac','2',fixture]).status,0);
-const wav=fs.readFileSync(fixture),image=fs.readFileSync(new URL('../public/icon-512.png',import.meta.url));
+assert.equal(spawnSync(FFMPEG,['-v','error','-y','-f','lavfi','-i','sine=frequency=330:duration=2:sample_rate=48000','-ac','2',fixture]).status,0);
+const wav=fs.readFileSync(fixture),image=fs.readFileSync(new URL('../iphone/public/icon-512.png',import.meta.url));
 let audioRequests=0;
 const media=http.createServer((req,res)=>{
   if(req.url==='/audio'){audioRequests++;res.writeHead(200,{'Content-Type':'audio/wav'});res.end(wav);}

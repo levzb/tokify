@@ -1,190 +1,115 @@
 # Tokify
 
-Личный плеер избранных звуков TikTok и своих аудио/видеофайлов. Svelte 5, Node.js, SQLite и ffmpeg. Музыка, обложки, задания импорта и пароль хранятся на вашем Mac в `data/`. В GitHub хранятся только исходники; личные данные и медиатека исключены из репозитория.
+A personal music player for your TikTok favorite sounds, YouTube / SoundCloud / Spotify links and your own audio and video files. Playlists, crossfade, trimming, offline MP3 downloads and an iPhone home-screen app. Everything runs on your own computer; your music, covers and library stay in `data/` and never go to GitHub.
 
-Готовый сайт: **http://localhost:8788**. Фоновый сервер продолжает импортировать архив, даже если закрыть вкладку. Прогресс виден на карточке выгрузки; нажатие на неё открывает панель обработки. Через иконку в боковой панели можно открыть список уже готовых песен.
+Windows, macOS and Linux. Svelte 5, Node.js, SQLite, ffmpeg.
 
-## Запуск
+## Install (one command)
 
-Требуется Node.js 22.13 или новее и ffmpeg. На этом Mac зависимости и Chromium уже установлены.
-
-При установке с нуля:
+You need [Git](https://git-scm.com) and [Node.js 22.13+](https://nodejs.org). Then:
 
 ```sh
-npm ci
-brew install ffmpeg
-npx playwright install chromium
-npm run password
-npm run build
-npm start
+git clone https://github.com/levzb/tokify && cd tokify && npm run setup
 ```
 
-`npm run password` скрывает ввод в терминале и меняет пароль без перезапуска сервера. Минимум шесть символов. Все устройства после смены пароля должны войти заново.
+`npm run setup` installs the dependencies, ffmpeg, Chromium (for TikTok pages) and yt-dlp (for YouTube and SoundCloud), builds the app, starts it and opens **http://localhost:8788**. Nothing is installed system-wide: ffmpeg comes from npm, yt-dlp goes to `data/tools/`. Run it again any time to update yt-dlp or rebuild after `git pull`.
 
-Для первого входа в подготовленную здесь библиотеку откройте локальный файл `data/initial-password.txt`. Это случайный пароль; он не записан в исходники. Можно сразу задать собственный через `npm run password`; временный файл при этом удаляется.
+Or just double-click **Start Tokify.cmd** (Windows) / **Start Tokify.command** (macOS): the first time it runs setup, after that it only starts Tokify.
 
-Обычный повторный запуск:
+| Command | |
+|---|---|
+| `npm start` | start in the background and open the browser (runs after you close the terminal) |
+| `npm stop` | stop it |
+| `npm run dev` | development: server restarts on change, the app with hot reload on http://localhost:5173 |
+| `npm test` | server and unit tests |
+| `npm run test:browser` | browser checks (see below) |
 
-```sh
-npm start
+The log is `data/server.log`. Use another port with `PORT=9000` (in PowerShell: `$env:PORT=9000; npm start`). `TOKIFY_NO_OPEN=1` keeps the browser closed. Your own ffmpeg, ffprobe or yt-dlp can be used via `TOKIFY_FFMPEG`, `TOKIFY_FFPROBE`, `TOKIFY_YTDLP`.
+
+## Project layout
+
+```
+server/   Node.js server: index.js (HTTP routes), system.js (install/start/stop), db.js, shared.js,
+          audio.js (ffmpeg, trimming), stream.js (continuous stream, downloads), sources.js (TikTok,
+          yt-dlp, Spotify), imports.js (import queue, files, links)
+src/      the web app (Svelte components, player, state, styles)
+iphone/   everything made only for iPhone: full-screen player, mini player, touch gestures, home-screen icon
+tests/    *.test.js (npm test) and browser.mjs (npm run test:browser)
+data/     your private library (created on first run, ignored by Git)
 ```
 
-Чтобы сервер работал после закрытия терминала:
+## Import from TikTok
 
-```sh
-npm run start:background
-```
+In TikTok: **Settings → Privacy → Download your data**, format JSON. On Home, choose the ZIP, the JSON or a folder and press **Upload**. Import all sounds, the first N, or pick them by hand, and name the upload. Only *Favorite Sounds* are used (not liked videos). All link forms of the real export are recognized (`/h5/share/music/ID.html`, `/music/…-ID`, `/share/music/ID`, bare IDs).
 
-Повтор этой команды не запускает второй сервер на том же порту. Лог — `data/server.log`, PID — `data/server.pid`. Остановка фонового процесса:
+Sounds are fetched by the server through its own Chromium; TikTok never asks for your account. Progress shows on the upload card; you can close the tab, and an unfinished import continues after a restart. Audio already downloaded is reused. Unavailable sounds stay grey with the reason and a retry in the menu. Real titles and covers appear as each sound is fetched (the export only contains links); for deleted sounds they may be gone.
 
-```sh
-kill "$(cat data/server.pid)"
-```
+## Add by link
 
-Сервер, запущенный через `npm start`, останавливается `Ctrl+C`. После перезагрузки Mac сервер нужно запустить снова. Для другого порта используйте `PORT=9000 npm start`.
+Paste a link into the box at the top of Home: **TikTok** (including `vm.`/`vt.tiktok.com`, `/t/…` and share text), **YouTube** (videos, Shorts, youtu.be), **SoundCloud** tracks, or a **Spotify** track. The preview shows title, author, length and cover; nothing is downloaded until you press **Import**. **Import & trim** imports and then opens the trim editor.
 
-## Импорт
+- YouTube and SoundCloud download through yt-dlp. Single tracks only (no channels, albums, playlists or live streams), up to 45 minutes. Private, DRM or login-only recordings are reported, not faked. Browser cookies and accounts are never read.
+- Spotify gives only the track info; its audio is never downloaded and the 30-second preview is not used. Press **Find on YouTube**, check the matches and **Choose** one: that YouTube source is then imported. A matching title does not guarantee the same recording, so you choose.
 
-В TikTok: «Настройки → Конфиденциальность → Скачать данные», формат JSON. На главной выберите ZIP, JSON либо папку; затем нажмите Upload. Доступны все звуки, первые X или ручной выбор, а также своё название выгрузки.
+Link imports and your own files go to the **My files** upload, pinned first. A song that is already there shows **Open**. A preview lasts 10 minutes.
 
-Поддерживается структура реального архива: `Likes and Favorites → Favorite Sounds → FavoriteSoundList`, ссылки `/h5/share/music/ID.html`, старые короткие ID, обычные `/music/...-ID` и `/share/music/ID`. **В добавленном архиве 967 записей; все распознаются.** В соответствии с сохранённым решением проекта используются только Favorite Sounds, без лайкнутых видео.
+## Your own audio and video
 
-Загрузка идёт на Mac через отдельный Chromium и локальный сервер; TikTok не требует ваших учётных данных. Недоступные звуки остаются серыми с причиной и повторной попыткой в меню. Уже скачанное аудио используется повторно. Незавершённое задание и его прогресс сохраняются в SQLite и продолжаются после перезапуска сервера.
+Drop or choose audio/video files or a folder in the same box (MP3, WAV, FLAC, M4A, OGG, MP4, MOV, WebM, MKV and more, up to 512 MB). Files are checked right away: photos, documents, damaged files and videos without sound are rejected with a reason before anything is added. Press **Upload** to see a preview where you click the title or author to edit them, then **Import**.
 
-Первые пять звуков были импортированы отдельно для проверки. Основная выгрузка называется «Избранное TikTok · 31.10.2026». Песни в ней используют те же локальные файлы; повторных копий аудио нет. Проверочную выгрузку можно удалить, основная останется.
+The first audio track is saved as M4A. The cover is the video's first frame or the picture embedded in the audio, otherwise a placeholder (set your own from the song menu). Identical files are recognized by content (SHA-256) and not stored twice. Unconfirmed previews are deleted after 24 hours. Upload a TikTok ZIP/JSON separately from media files.
 
-До первого обращения к TikTok экспорт обычно даёт только ссылку и дату, поэтому настоящие названия и обложки появляются при скачивании. У удалённого звука получить их иногда уже невозможно.
+## Play and organize
 
-## Скачать звук по ссылке
+Click a song to play its playlist. Choose **In order / Shuffle** and the transition **Direct / Fade / Crossfade**. The repeat button next to a song's number loops that song with the current transition. Right-click, long-press or **⋯** on a song: play next, add to queue, add to any playlist, rename song, edit author, trim audio, download, custom cover, remove from playlist. Click a playlist's title to rename it, its cover to change the picture. Drag rows to reorder (on a phone, use the handle on the right). **All songs → Select** to file many songs at once.
 
-В самом верху главной вставьте ссылку на **TikTok, YouTube, SoundCloud или трек Spotify**. Вставка запускает поиск автоматически; также можно нажать Find или Enter. Поддерживаются обычные ссылки, короткие `vm.tiktok.com` / `vt.tiktok.com`, `/t/...` и текст из меню «Поделиться».
+Keys: Space pauses, arrows seek 5 s, Shift + arrows change track, Escape closes menus and dialogs.
 
-YouTube и SoundCloud скачиваются через yt-dlp на Mac, с доступными названием, автором и обложкой. Поддерживаются отдельные ролики (включая YouTube Shorts и youtu.be), отдельные треки SoundCloud и короткие ссылки. Каналы, альбомы, целые плейлисты и прямые эфиры не импортируются этой строкой. Максимальная длина — 45 минут на трек. Превью, DRM, закрытые или требующие недоступной авторизации записи не выдаются за полноценную песню; ошибки видны в интерфейсе.
+Everything except getting new sounds works without internet: playlists, editing, playback of downloaded songs, preparing downloads. Changes are saved at once to `data/library.sqlite`.
 
-**Spotify:** сайт получает только информацию о треке. Полное аудио непосредственно из Spotify не скачивается, 30-секундное превью не используется. Нажмите **Find on YouTube**, проверьте варианты и выберите **Choose**. После этого показан настоящий источник YouTube, и его аудио можно скачать обычной кнопкой Import. Совпадение названия не гарантирует совпадение версии записи, поэтому источник выбирается вручную.
+## Trim
 
-Для YouTube и SoundCloud один раз установите загрузчик: `npm run setup:media` (нужны интернет, Python 3.11+ и уже установленный ffmpeg). На этом Mac он уже установлен. Инструмент и зависимости находятся в приватном `data/tools/yt-dlp/`; глобальный Python не изменяется. Этой же командой можно обновить yt-dlp, если площадки изменились. Вместо локальной установки можно указать исполняемый файл через `TOKIFY_YTDLP`. Куки браузера и учётные данные сервисов автоматически не читаются.
+**⋯ → Trim audio** on any song: drag the white edges on the waveform or type Start / End (minimum 0.5 s), **Zoom to selection** for long recordings. **Play excerpt** previews it (optionally looping). **Save excerpt** applies it everywhere the song appears, including transitions, repeat and new downloads. The original file is kept: reopen the editor to widen the range or **Restore original**.
 
-Если звук доступен, появятся название, автор, длительность, обложка и кнопка Import. Поиск не скачивает аудио и не создаёт песню. После Import звук добавляется в ту же закреплённую выгрузку **«Мои файлы»**, куда попадают собственные файлы, и в All songs. Отдельная выгрузка для ссылок не создаётся. Уже скачанное аудио используется повторно; для песни, которая уже есть в этой выгрузке, показана кнопка Open. Ошибки скачивания остаются серыми в плейлисте и доступны для повторной попытки.
+## Offline downloads
 
-У любой добавленной песни через меню **⋯** доступны **Rename song** и **Edit author** — для файлов, ссылок и выгрузок TikTok. Изменения сразу видны в списках и плеере; пользовательские название и автор сохраняются после перезапуска и повторного скачивания. Автор может быть пустым.
+**Download library** on Home, the download button in a playlist, or **⋯ → Download audio** on a song. Then **Prepare download**:
 
-Предпросмотр ссылки действует 10 минут и хранится только в памяти сервера. После перезапуска сервера нужно найти ссылку заново, но принятое скачивание продолжится. Приватные, удалённые, регионально недоступные или заблокированные TikTok страницы могут не находиться; иногда помогает ссылка на сам звук.
+- **One continuous MP3**: all songs in one file with the transitions recorded into the audio, plus chapter titles and a cover. Plays anywhere with no site, network or app.
+- **Separate songs · ZIP**: one MP3 per song with title, author and cover, an M3U8 playlist and a report listing songs that could not be included. ZIP is limited to 4 GB.
 
-Проверка на изолированной библиотеке: `npm run test:links` — TikTok; `npm run test:media` — общий интерфейс YouTube / SoundCloud / Spotify. Chromium и WebKit с экраном iPhone; внешние сервисы в автоматических браузерных тестах заменены тестовыми ответами.
-
-## Выбрать и обрезать отрывок
-
-У любой скачанной песни откройте **⋯ → Trim audio**. Редактор общий для TikTok, YouTube, SoundCloud и собственных файлов. В нём показаны обложка, автор, исходная длительность и звуковая дорожка. Передвиньте белые границы или введите точные Start / End в секундах. Минимум — 0,5 секунды. Для длинной записи используйте Zoom to selection; Fit возвращает всю дорожку.
-
-**Play excerpt** прослушивает выбранный участок, кнопка повтора включает/отключает цикл предпрослушивания. Обычный плеер на время редактирования останавливается. **Save excerpt** применяет отрывок ко всем плейлистам, где есть эта песня. Cancel ничего не меняет. Скачанный файл не перезаписывается: можно снова открыть редактор, расширить границы или нажать **Restore original → Save excerpt**.
-
-При поиске по ссылке основная кнопка теперь **Import**. **Import & trim** сначала добавляет и скачивает запись в «Мои файлы», затем открывает редактор. Если после этого отменить редактор, импортированная полная запись останется в библиотеке. У уже добавленной записи доступна кнопка Trim audio. У Spotify сначала нужно выбрать источник YouTube — редактор работает с реальным скачанным аудио.
-
-Переходы и повтор используют сохранённый диапазон; новые MP3/ZIP тоже содержат выбранный участок. Уже подготовленные ранее файлы остаются в прежнем виде, для нового диапазона нужна новая выгрузка. Выбор отрывка и изменения сохраняются в SQLite и работают без интернета, если аудио уже скачано. Повторное скачивание оригинала сохраняет выбранный диапазон и пользовательские название/автора. Обрезка не создаёт вторую независимую копию песни.
-
-Проверка: `npm run test:clips`. Изолированные тесты проверяют границы, прослушивание, отмену, сохранение, проигрывание нового диапазона, повторное открытие, восстановление оригинала и Import & trim; физический iPhone не используется.
-
-## Свои аудио и видео
-
-В зоне «Archive or media files» можно выбрать несколько аудио/видеофайлов или папку. Сразу после выбора файлы загружаются во временное приватное хранилище на Mac и проверяются через ffprobe. Фото и документы отклоняются ещё в браузере; сервер повторно проверяет тип и реальное содержимое. Видео без аудиодорожки и повреждённые файлы получают ошибку до окна импорта и не добавляются в библиотеку. Если в наборе есть подходящие файлы, можно продолжить с ними; причины отклонения остальных показаны в зоне загрузки.
-
-Нажмите Upload, чтобы открыть предпросмотр проверенных файлов. Как в шапке плейлиста, слева показана обложка, справа — название и автор. Нажмите прямо на текст для редактирования: видимых полей ввода нет. Название по умолчанию берётся из имени файла без расширения, автора можно оставить пустым. Нажмите Import для добавления. Повторно передавать файл не нужно — используется уже проверенный оригинал. Название и автора можно менять и после добавления через меню песни: Rename song и Edit author.
-
-Сервер извлекает первую аудиодорожку и сохраняет AAC/M4A. Разрешены распространённые аудио- и видеоформаты: например MP3, WAV, FLAC, M4A, OGG, MP4, MOV, WebM, MKV. У видео первый кадр становится обложкой, у аудио используется встроенная картинка, если она есть. Если картинки нет, показана обычная музыкальная заглушка; свою обложку можно поставить через меню песни.
-
-Все внешние песни автоматически попадают в одну выгрузку **«Мои файлы»**, закреплённую первой в Uploads, и в All songs. Очередь, повтор, переходы и добавление в другие плейлисты работают так же, как для TikTok. Одинаковое содержимое распознаётся по SHA-256: повторный импорт использует готовое аудио и обновляет введённые название/автора, без новой копии песни.
-
-Предпросмотр действует 24 часа. Временные оригиналы и картинки удаляются при отмене или во время очередной очистки. После успешного извлечения остаются только аудио и обложка. Если ошибка возникла уже при извлечении проверенного файла, его оригинал сохраняется приватно в `data/uploads/` для повторной обработки.
-
-Максимальный размер файла — 512 МБ. Очень длинные записи могут превысить лимит декодирования в памяти (примерно 45 минут при 48 кГц стерео). ZIP/JSON по-прежнему обрабатываются как экспорт TikTok: их следует загружать отдельно от медиафайлов. Окно обработки можно скрыть. При перезагрузке страницы принятые в обработку файлы продолжат обрабатываться; для ещё не подтверждённых файлов понадобится снова открыть выбор.
-
-Проверка в отдельной временной библиотеке, без изменений вашей музыки:
-
-```sh
-npm run test:files
-```
+Downloads are prepared in the background and kept in `data/exports/`. On iPhone, save to **Files → On My iPhone** so the file is on the phone itself, or send it from the computer with AirDrop (works without internet).
 
 ## iPhone
 
-Для быстрой проверки подключите iPhone к той же Wi-Fi сети, что и Mac, и откройте в Safari `http://<IP-Mac>:8788`. IP можно посмотреть в настройках сети macOS. Адрес `localhost` на телефоне указывает на сам телефон.
+The site adapts to a phone screen: a mini player at the bottom, tap it for the full player (seek, shuffle, repeat, queue), menus open as sheets. Playback continues on the lock screen with the system media controls, because the server sends one continuous audio stream with the transitions already mixed in.
 
-Для постоянного использования и системных медиакнопок используйте **HTTPS**. Вариант для личного доступа — Tailscale:
+The private way to reach it from your phone is [Tailscale](https://tailscale.com) (free for personal use, HTTPS needed for the lock-screen controls and the home-screen app):
 
-1. Установите Tailscale на Mac и iPhone, войдите в один аккаунт и включите соединение на обоих устройствах.
-2. Включите HTTPS-сертификаты в настройках DNS своей сети Tailscale, если сервис предложит это сделать.
-3. На Mac запустите:
+1. Install Tailscale on the computer and the iPhone, sign in to the same account. Enable HTTPS certificates when Tailscale offers it.
+2. On the computer: `tailscale serve --bg http://127.0.0.1:8788`
+3. Open the `https://….ts.net` address it shows in Safari on the iPhone.
+4. Safari → **Share → Add to Home Screen**. Launch Tokify from the icon.
 
-   ```sh
-   tailscale serve --bg http://127.0.0.1:8788
-   ```
+Do not use `tailscale funnel`: that would put your library on the public internet. The computer must stay on with Tokify running (on a Mac, `caffeinate -i npm start` keeps it awake).
 
-4. Откройте показанный HTTPS-адрес в Safari на iPhone. Войдите по паролю.
-5. Safari → «Поделиться» → «На экран “Домой”» → «Добавить». Запускайте плеер с появившейся иконки. При первом запуске с иконки может потребоваться повторный вход.
+## Privacy and security
 
-Это приватный доступ внутри вашей сети Tailscale. Команда `tailscale funnel` для этого проекта не нужна. Tailscale на этом Mac пока не установлен; подключение вашего аккаунта не выполнялось. См. [официальную инструкцию Serve](https://tailscale.com/docs/features/tailscale-serve) и [включение HTTPS](https://tailscale.com/docs/how-to/set-up-https-certificates).
+There is no password. Tokify listens only on `127.0.0.1`, so only this computer and Tailscale (which forwards to it) can reach it. Requests that claim to come from other websites are refused, so a page you visit cannot control your library.
 
-Mac должен оставаться включённым, сервер должен работать, а iPhone — иметь сетевой доступ к нему. При прослушивании с заблокированным экраном можно использовать `caffeinate -i npm start` на Mac, чтобы не допустить его автоматического сна. Закрытая крышка ноутбука всё равно может отправить его в сон.
+`HOST=0.0.0.0 npm start` opens it to your whole Wi-Fi network (for example `http://192.168.1.20:8788` on the phone) **without any login**: anyone on that network can then use and change your library. Only do this on a network you trust.
 
-## Управление
+`data/` holds the audio, covers, database, downloads and tools; on macOS and Linux its new files are readable only by your user. It, TikTok archives, media files and screenshots are excluded by `.gitignore`. Removing the last playlist a song is in hides it but keeps its audio, so reimporting does not download it again.
 
-Нажмите песню для запуска плейлиста. Кнопка повтора слева от номера запускает выбранную песню по кругу с текущим переходом Direct, Fade или Crossfade; повторное нажатие возвращает обычное воспроизведение плейлиста. Меню по правой кнопке, долгому нажатию или кнопке «⋯»: очередь, «играть следующей», добавление в любой плейлист, замена обложки и удаление из плейлиста. На телефоне тяните за ручку справа от песни для изменения порядка; на компьютере можно тянуть саму строку. Нажатие на название плейлиста переименовывает его, на обложку — меняет картинку.
+Backup: `npm stop`, copy `data/` somewhere private, `npm start`. Another location: `TOKIFY_DATA=/path/to/library`. To delete the library entirely: `npm stop` and delete `data/`.
 
-На компьютере: пробел — пауза; стрелки — перемотка на пять секунд; Shift + стрелки — следующий/предыдущий трек. На iPhone коснитесь нижнего мини-плеера, чтобы открыть перемотку, повтор, перемешивание и очередь. Громкость на iPhone регулируется системными кнопками.
-
-## Проверки и ограничения
+## Browser checks
 
 ```sh
-npm test
-npm run build
+npx playwright install webkit
+npm run test:browser                  # all isolated checks, in temporary libraries
+npm run test:browser -- clips media   # only some: files links media clips downloads offline
+npm run test:browser -- library       # your real library: Tokify running, your TikTok_Data_*.zip in the folder
 ```
 
-Для браузерных проверок требуются Chromium, WebKit и локальная библиотека с добавленным архивом:
-
-```sh
-npx playwright install chromium webkit
-npm run test:browser
-```
-
-Браузерный тест создаёт временный плейлист из настоящих песен и удаляет его после проверки. Он рассчитан на текущую библиотеку с активным импортом. Для другого адреса задайте `TOKIFY_BASE_URL`, для файла с паролем — `TOKIFY_PASSWORD_FILE`. Снимки сохраняются в `screenshots/`, каталог исключён из Git.
-
-Результаты и честные ограничения iOS описаны в [VERIFICATION.md](VERIFICATION.md).
-
-## Сортировать музыку на Mac без интернета
-
-Дважды нажмите **Start Tokify.command** в папке проекта. Либо в терминале из папки проекта: `npm run offline`. Команда запускает локальный сервер и открывает `http://localhost:8788/`. Если сервер уже запущен, используется он же. Зависимости и сборка должны быть установлены один раз заранее; при офлайн-запуске ничего не скачивается.
-
-Можно выключить Wi-Fi и работать прямо на Mac: создавать и переименовывать плейлисты, выделять несколько песен и добавлять их в нужный плейлист, перетаскивать порядок, убирать песни из плейлиста, менять название и автора, слушать уже скачанное и готовить MP3/ZIP. Всё это работает через localhost и SQLite на самом компьютере. Изменения сохраняются сразу в `data/library.sqlite`, переживают закрытие браузера и перезапуск сервера; после появления интернета останутся те же плейлисты. Отдельная синхронизация не нужна.
-
-Для раскладки: **Home → All songs → Select → отметить песни → Add to playlist → нужный плейлист**. Сначала можно создать пустые плейлисты через New playlist. Удаление песни из плейлиста убирает только её принадлежность этому плейлисту, а не песню из остальных выгрузок.
-
-Интернет требуется только для получения новых звуков/обложек с TikTok. Сам Mac и локальный сервер должны быть включены. С телефона в этой же локальной сети можно открыть адрес Mac; без связи с Mac на телефоне используйте заранее сохранённый MP3.
-
-Проверка `npm run test:offline` запускает изолированную библиотеку офлайн-командой и проходит создание, переименование, массовое добавление, перетаскивание, удаление из плейлиста, изменение названия песни и проигрывание. Chromium и WebKit работают с заблокированными внешними запросами и `navigator.onLine=false`; проверяется сохранность после перезагрузки страницы и полного перезапуска сервера. Боевую медиатеку тест не меняет.
-
-## Слушать в самолёте и без интернета
-
-На главной рядом с переключателем Uploads / All songs есть кнопка со стрелкой вниз — **Download library**. В плейлисте такая же кнопка находится рядом с Select и ⋯. У отдельной песни: **⋯ → Download audio**.
-
-Выберите формат и нажмите **Prepare download**:
-
-- **One continuous MP3**: один аудиофайл со всеми выбранными песнями. Direct, Fade или Crossfade уже записаны в аудио, поэтому между песнями телефону не нужны сайт, сеть или JavaScript. Можно заранее перемешать порядок. В файле есть названия глав и обложка; поддержка отображения глав зависит от проигрывателя.
-- **Separate songs · ZIP**: отдельные MP3 с названиями, авторами и доступными обложками, UTF-8 плейлист M3U8, JSON-отчёт и список недоступных песен. Автоматическое воспроизведение ZIP как плейлиста требует проигрывателя с поддержкой M3U; «Файлы» позволяют открыть отдельный трек. Для непрерывного прослушивания без установки приложений выбирайте первый вариант.
-
-После подготовки нажмите **Download MP3** или **Download ZIP**. На iPhone сохраните в **«Файлы → На iPhone»**, чтобы файл находился на самом телефоне, а не только в iCloud. Если телефон сейчас не подключён к Mac, скачайте файл на Mac и передайте через AirDrop: включите Wi-Fi и Bluetooth на обоих устройствах, оставьте их рядом, выберите файл в Finder → Поделиться → AirDrop → свой iPhone. Передача между соседними устройствами не требует интернета. После приёма откройте файл на телефоне; Mac можно выключить.
-
-В самолёте авиарежим можно оставить включённым, включив Wi-Fi и Bluetooth обратно для AirDrop. Для подготовки и передачи уже скачанной музыки доступ к TikTok не нужен. Недоступное или ещё не скачанное аудио не включается: число исключённых песен показывается в окне и в отчёте.
-
-Сервер Tokify тоже запускается без интернета: `npm run start:background` (после уже выполненной сборки). Для прослушивания именно с сайта Mac и iPhone должны быть в общей локальной сети. Сам сайт в этой версии **не сохраняется как офлайн-PWA**: если Mac недоступен, слушайте сохранённый MP3 через «Файлы» или другой проигрыватель. В полном MP3 порядок и переходы фиксированы; изменить их можно новой выгрузкой. Кнопки и интерфейс Tokify не переносятся внутрь аудиофайла.
-
-Экспорт готовится в фоне, прогресс виден в окне; окно можно скрыть. После перезапуска сервера незавершённая подготовка начинается заново автоматически. Готовый файл повторно используется, пока состав, порядок, метаданные и настройки не изменились. Принятые HTTP-загрузки поддерживают байтовые диапазоны. Все подготовленные файлы, отчёты и промежуточные данные находятся только в игнорируемом Git каталоге `data/exports/`. ZIP ограничен 4 ГБ; для большей библиотеки выгружайте плейлисты отдельно.
-
-Проверка: `npm run test:downloads` — Chromium и WebKit с экраном iPhone скачивают настоящий MP3 и проигрывают его из Blob при отключённой сети, включая переход к следующей песне и перемотку. Это не проверка приложения «Файлы», AirDrop или блокировки на физическом iPhone.
-
-## Приватные файлы и резервная копия
-
-`data/`, архив TikTok, аудио и видео, база, `.env` и скриншоты исключены через `.gitignore`. В репозиторий входят исходники, тесты, документация и собственные иконки приложения. Пароль создаётся локально командой `npm run password` и в GitHub не передаётся.
-
-В `data/` находятся аудио, обложки, настройки, пароль в виде scrypt-хеша и сессии входа. Новые приватные файлы создаются с доступом только для текущего пользователя macOS. Удаление последнего плейлиста скрывает песни из библиотеки, но сохраняет файлы в приватном кэше: повторный импорт не скачивает их снова, а текущее воспроизведение не обрывается.
-
-Для резервной копии остановите сервер, скопируйте весь `data/` в приватное место и запустите сервер снова. `TOKIFY_DATA=/другой/путь npm start` позволяет изменить место хранения. Для полного удаления библиотеки остановите сервер и удалите её каталог данных; он содержит также пароль и настройки.
+Chromium on a desktop screen and WebKit on an iPhone 13 screen. External services are replaced with stand-ins, and your music is not touched (except `library` and `repeat`, which add a temporary playlist and remove it). Screenshots go to `screenshots/`. WebKit is not a physical iPhone: Files, AirDrop and the lock screen still need a real device. WebKit for Windows cannot play `blob:` media, so on Windows the saved-MP3 playback step runs only in Chromium.

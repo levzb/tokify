@@ -5,19 +5,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { unzipSync, strFromU8 } from 'fflate';
-import { buildTimeline } from '../shared/timeline.js';
+import { buildTimeline } from '../server/shared.js';
+import { tool } from '../server/system.js';
+const FFMPEG = tool('ffmpeg'), FFPROBE = tool('ffprobe');
 const data=fs.mkdtempSync(path.join(os.tmpdir(),'tokify-exports-'));process.env.TOKIFY_DATA=data;
 const {db}=await import('../server/db.js');
-const {createExport,exportJob,exportReport,safeName}=await import('../server/exports.js');
+const {createExport,exportJob,exportReport,safeName}=await import('../server/stream.js');
 // Offline preparation must never fetch remote resources.
 globalThis.fetch=()=>{throw Error('Export attempted a network request');};
 const ids=['7400000000000000001','7400000000000000002'];
-const probe=(file)=>JSON.parse(spawnSync('ffprobe',['-v','error','-show_format','-show_chapters','-show_streams','-of','json',file],{encoding:'utf8'}).stdout);
+const probe=(file)=>JSON.parse(spawnSync(FFPROBE,['-v','error','-show_format','-show_chapters','-show_streams','-of','json',file],{encoding:'utf8'}).stdout);
 for(const [i,id]of ids.entries()){
- assert.equal(spawnSync('ffmpeg',['-v','error','-y','-f','lavfi','-i',`sine=frequency=${330+i*110}:duration=3:sample_rate=48000`,'-ac','2',path.join(data,'audio',id+'.wav')]).status,0);
+ assert.equal(spawnSync(FFMPEG,['-v','error','-y','-f','lavfi','-i',`sine=frequency=${330+i*110}:duration=3:sample_rate=48000`,'-ac','2',path.join(data,'audio',id+'.wav')]).status,0);
  db.prepare("INSERT INTO tracks(id,title,author,status,samples,audio_file,cover_file,source_name,added) VALUES(?,?,?,'ok',?,?,?,?,?)").run(id,['Ночной звук🎵','../Other/Title'][i],'Мой автор',144000,id+'.wav',i===0?'fixture.png':null,'Export test',i);
 }
-fs.copyFileSync(new URL('../public/icon-512.png',import.meta.url),path.join(data,'covers','fixture.png'));
+fs.copyFileSync(new URL('../iphone/public/icon-512.png',import.meta.url),path.join(data,'covers','fixture.png'));
 db.prepare("INSERT INTO tracks(id,title,status,error) VALUES('7400000000000000003','Unavailable sound','failed','Removed by TikTok')").run();
 db.prepare("INSERT INTO playlists(id,name,kind,created) VALUES('fixture','Мой плейлист','import',1)").run();
 for(const [i,id]of [...ids,'7400000000000000003'].entries())db.prepare("INSERT INTO playlist_tracks VALUES('fixture',?,?)").run(id,i);
@@ -49,7 +51,7 @@ await test('offline exports: continuous transitions, portable ZIP, metadata, cac
  });
  await t.test('completed exports survive module restart and metadata edits invalidate the prepared copy',async()=>{
    const old=createExport({trackIds:[ids[0]],format:'mix'});await finish(old.id);
-   const restarted=await import('../server/exports.js?reload=1');assert.equal(restarted.exportJob(old.id).status,'ready');
+   const restarted=await import('../server/stream.js?reload=1');assert.equal(restarted.exportJob(old.id).status,'ready');
    db.prepare('UPDATE tracks SET title=?,ver=ver+1 WHERE id=?').run('Edited title',ids[0]);
    const updated=createExport({trackIds:[ids[0]],format:'mix'});assert.notEqual(updated.id,old.id);await finish(updated.id);
  });

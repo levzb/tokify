@@ -1,11 +1,13 @@
+// The library database and the private data folders (data/ unless TOKIFY_DATA says otherwise).
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { ROOT, dataDir } from './system.js';
 
-export const ROOT = path.resolve(import.meta.dirname, '..');
-process.umask(0o077);
-export const DATA = process.env.TOKIFY_DATA || path.join(ROOT, 'data');
+export { ROOT };
+export const DATA = dataDir();
+process.umask(0o077); // new private files: owner only
 export const DIRS = {
   audio: path.join(DATA, 'audio'),
   covers: path.join(DATA, 'covers'),
@@ -19,8 +21,8 @@ export const db = new DatabaseSync(path.join(DATA, 'library.sqlite'));
 db.exec(`
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
-CREATE TABLE IF NOT EXISTS auth_sessions (token TEXT PRIMARY KEY, created INTEGER, seen INTEGER);
+DROP TABLE IF EXISTS kv;            -- held the old password and its sessions
+DROP TABLE IF EXISTS auth_sessions;
 CREATE TABLE IF NOT EXISTS tracks (
   id TEXT PRIMARY KEY,            -- TikTok music id
   link TEXT,
@@ -63,15 +65,6 @@ for (const [name, definition] of [['origin', "TEXT NOT NULL DEFAULT 'tiktok'"], 
   if (!trackColumns.has(name)) db.exec(`ALTER TABLE tracks ADD COLUMN ${name} ${definition}`);
 }
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS one_external_upload ON playlists(kind) WHERE kind = 'external'");
-
-export const kv = {
-  get(k) { const r = db.prepare('SELECT v FROM kv WHERE k = ?').get(k); return r ? JSON.parse(r.v) : undefined; },
-  set(k, v) { db.prepare('INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, JSON.stringify(v)); },
-};
-
-if (!kv.get('secret')) kv.set('secret', crypto.randomBytes(32).toString('hex'));
-export const SECRET = kv.get('secret');
-export const MEDIA_KEY = crypto.createHmac('sha256', SECRET).update('media').digest('hex').slice(0, 32);
 
 export const uid = () => crypto.randomBytes(9).toString('base64url');
 

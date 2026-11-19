@@ -1,39 +1,29 @@
 <script>
   import { onMount } from 'svelte';
-  import { api, setUnauthorizedHandler } from './lib/api.js';
-  import { lib, load, playlistById } from './lib/library.svelte.js';
-  import { ui } from './lib/ui.svelte.js';
-  import { player, restore } from './lib/player.svelte.js';
-  import { restoreImport } from './lib/importJob.svelte.js';
-  import Login from './components/Login.svelte';
-  import Sidebar from './components/Sidebar.svelte';
-  import Home from './components/Home.svelte';
-  import PlaylistView from './components/PlaylistView.svelte';
-  import PlayerBar from './components/PlayerBar.svelte';
-  import NowPlaying from './components/NowPlaying.svelte';
-  import QueuePanel from './components/QueuePanel.svelte';
-  import ContextMenu from './components/ContextMenu.svelte';
-  import Dialog from './components/Dialog.svelte';
-  import Toast from './components/Toast.svelte';
-  import ImportFlow from './components/ImportFlow.svelte';
-  import FileImportFlow from './components/FileImportFlow.svelte';
-  import DownloadFlow from './components/DownloadFlow.svelte';
-  import ClipEditor from './components/ClipEditor.svelte';
-  import { restoreDownload } from './lib/download.svelte.js';
+  import { lib, load, playlistById, ui, restoreImport, restoreDownload } from './state.svelte.js';
+  import { player, restore } from './player.svelte.js';
+  import Sidebar from './Sidebar.svelte';
+  import Home from './Home.svelte';
+  import PlaylistView from './PlaylistView.svelte';
+  import PlayerBar from './PlayerBar.svelte';
+  import NowPlaying from '../iphone/NowPlaying.svelte';
+  import QueuePanel from './QueuePanel.svelte';
+  import Popups from './Popups.svelte';
+  import ImportFlow from './ImportFlow.svelte';
+  import FileImportFlow from './FileImportFlow.svelte';
+  import DownloadFlow from './DownloadFlow.svelte';
+  import ClipEditor from './ClipEditor.svelte';
 
-  let auth = $state('checking'); // checking | in | out
-  setUnauthorizedHandler(() => { auth = 'out'; });
+  let failed = $state('');
 
   async function start() {
+    failed = '';
     try {
-      const me = await api('/api/me');
-      if (!me.authed) { auth = 'out'; return; }
-      auth = 'in';
       await load();
       restore();
       await restoreImport();
       restoreDownload();
-    } catch { auth = 'out'; }
+    } catch (e) { failed = e.message; }
   }
   onMount(start);
 
@@ -48,9 +38,7 @@
   });
 </script>
 
-{#if auth === 'out'}
-  <Login onDone={start} />
-{:else if auth === 'in' && lib.loaded}
+{#if lib.loaded}
   <div class="shell" class:has-player={!!player.trackId}>
     <Sidebar />
     <main class="main-scroll" style="--glow: {glow}">
@@ -74,11 +62,11 @@
   <FileImportFlow />
   <DownloadFlow />
   <ClipEditor />
-  <ContextMenu />
-  <Dialog />
-  <Toast />
+  <Popups />
 {:else}
-  <div class="boot"><span class="spinner"></span></div>
+  <div class="boot">
+    {#if failed}<p>{failed}</p><button class="btn ghost" onclick={start}>Try again</button>{:else}<span class="spinner"></span>{/if}
+  </div>
 {/if}
 
 <style>
@@ -98,7 +86,7 @@
     padding: 40px 40px 64px;
     animation: fadeUp .6s var(--ease) both;
   }
-  .boot { position: fixed; inset: 0; display: grid; place-items: center; }
+  .boot { position: fixed; inset: 0; display: grid; place-content: center; justify-items: center; gap: 16px; padding: 24px; text-align: center; color: var(--muted); }
 
   @media (max-width: 760px) {
     .shell {

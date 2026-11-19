@@ -1,20 +1,20 @@
+// The HTTP server: JSON API, audio stream, covers and the built app from dist/.
+// There is no password. The server listens only on this computer (127.0.0.1); the iPhone reaches it
+// through Tailscale (see README). HOST=0.0.0.0 opens it to the whole local network.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { db, uid, tx, ROOT, DIRS, MEDIA_KEY } from './db.js';
-import { login, logout, isAuthed, hasPassword } from './auth.js';
-import { createImport, retryTrack, jobStatus, listJobs, startFileJob } from './importer.js';
-import { receiveFile, scanFile, commitFile, stagedFile, discardStagedFile } from './external.js';
-import { createSession, serveStream } from './stream.js';
-import { normalizeImage, coverColor, customPath } from './audio.js';
-import { shutdown as closeBrowser } from './tiktok.js';
-import { previewLink, downloadLink, linkPreviewCover, searchSpotifyLink } from './link-import.js';
-import { clipInfo, setClip, serveClipSource } from './clips.js';
-import { TRACK_ID_RE } from '../shared/media-link.js';
-import { createExport, exportJob, recentExports, exportReport, serveExport } from './exports.js';
+import net from 'node:net';
+import { db, uid, tx, ROOT, DIRS } from './db.js';
+import { createImport, retryTrack, jobStatus, listJobs, startFileJob, receiveFile, scanFile, commitFile, stagedFile, discardStagedFile,
+  previewLink, downloadLink, linkPreviewCover, searchSpotifyLink } from './imports.js';
+import { createSession, serveStream, createExport, exportJob, recentExports, exportReport, serveExport } from './stream.js';
+import { normalizeImage, coverColor, customPath, clipInfo, setClip, serveClipSource } from './audio.js';
+import { shutdown as closeBrowser } from './sources.js';
+import { TRACK_ID_RE } from './shared.js';
 
 const PORT = Number(process.env.PORT || 8788);
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || '127.0.0.1';
 const DIST = path.join(ROOT, 'dist');
 
 // ---------- helpers ----------
@@ -47,7 +47,7 @@ const trackIdsInput = (ids = []) => {
   return [...new Set(ids)];
 };
 
-const mediaUrl = (kind, file, ver) => `/media/${kind}/${encodeURIComponent(file)}?v=${ver || 1}&k=${MEDIA_KEY}`;
+const mediaUrl = (kind, file, ver) => `/media/${kind}/${encodeURIComponent(file)}?v=${ver || 1}`;
 
 function trackOut(t) {
   return {
@@ -103,22 +103,14 @@ function serveFile(req, res, file, cache) {
 
 // ---------- routes ----------
 const routes = [];
-const route = (method, pattern, handler, { open = false } = {}) => {
+const route = (method, pattern, handler) => {
   const keys = [];
   const re = new RegExp('^' + pattern.replace(/:(\w+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$');
-  routes.push({ method, re, keys, handler, open });
+  routes.push({ method, re, keys, handler });
 };
 
-route('GET', '/api/me', (req, res) => send(res, 200, { authed: isAuthed(req), hasPassword: hasPassword() }), { open: true });
-route('POST', '/api/login', async (req, res) => {
-  const { password } = await readJSON(req, 10_000);
-  if (!hasPassword()) return fail(res, 503, 'No password set yet. On the Mac run: npm run password');
-  const r = login(req, res, password);
-  if (r.ok) return send(res, 200, { ok: true });
-  return send(res, 401, { error: r.wait ? `Too many attempts. Wait ${r.wait} s.` : 'Wrong password' });
-}, { open: true });
-route('POST', '/api/logout', (req, res) => { logout(req, res); send(res, 200, { ok: true }); }, { open: true });
-
+route('GET', '/api/ping', (req, res) => send(res, 200, { ok: true }));
+route('POST', '/api/quit', (req, res) => { send(res, 200, { ok: true }); setImmediate(quit); });
 route('GET', '/api/library', (req, res) => send(res, 200, library()));
 route('POST', '/api/exports', async (req, res) => send(res, 200, createExport(await readJSON(req))));
 route('GET', '/api/exports', (req, res) => send(res, 200, { jobs: recentExports() }));
@@ -134,21 +126,6 @@ route('GET', '/api/links/previews/:token/cover', async (req,res,{token}) => {
   const image=await linkPreviewCover(token);if(!image)return fail(res,404,'Cover unavailable');
   res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, no-store','Content-Length':image.length});res.end(image);
 });
-route('POST', '/api/tiktok/resolve', async (req, res) => {
-  const { link } = await readJSON(req, 10_000);
-  send(res, 200, await previewLink(link));
-});
-route('POST', '/api/tiktok/download', async (req, res) => {
-  const { token } = await readJSON(req, 10_000);
-  send(res, 200, downloadLink(token));
-});
-route('GET', '/api/tiktok/previews/:token/cover', async (req, res, { token }) => {
-  const image = await linkPreviewCover(token);
-  if (!image) return fail(res, 404, 'Cover unavailable');
-  res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, no-store', 'Content-Length': image.length });
-  res.end(image);
-});
-
 route('POST', '/api/files/scan', async (req, res) => send(res, 200, await scanFile(req)));
 route('GET', '/api/files/staged/:token/cover', (req, res, { token }) => {
   const stage = stagedFile(token);
@@ -303,22 +280,28 @@ route('POST', '/api/sessions', async (req, res) => {
 });
 
 // ---------- server ----------
+// Without a password, other websites open in the same browser must not reach the library:
+// requests that name a foreign host (DNS rebinding) or come from another site are refused.
+function ownHost(header = '') {
+  const host = header.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+  return net.isIP(host) > 0 || !host.includes('.') || host.endsWith('.ts.net') || host.endsWith('.local');
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://x');
     let p;
     try { p = decodeURI(url.pathname); } catch { return fail(res, 400, 'Invalid URL'); }
+    if (!ownHost(req.headers.host)) return fail(res, 403, 'Open Tokify through localhost or its own address');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       const origin = req.headers.origin;
       if (req.headers['sec-fetch-site'] === 'cross-site' || (origin && new URL(origin).host !== req.headers.host)) return fail(res, 403, 'Open Tokify directly to make changes');
     }
     if (p.startsWith('/stream/')) {
-      if (!isAuthed(req)) { res.writeHead(401); return res.end(); }
       const id = p.slice(8).replace(/\.mp3$/, '');
       return await serveStream(req, res, id);
     }
     if (p.startsWith('/media/')) {
-      if (url.searchParams.get('k') !== MEDIA_KEY && !isAuthed(req)) { res.writeHead(403); return res.end(); }
       const [, , kind, file] = p.split('/');
       const dir = kind === 't' ? DIRS.covers : kind === 'c' ? DIRS.custom : null;
       if (!dir || !file || file.includes('..')) { res.writeHead(404); return res.end(); }
@@ -329,7 +312,6 @@ const server = http.createServer(async (req, res) => {
         if (r.method !== req.method) continue;
         const m = r.re.exec(p);
         if (!m) continue;
-        if (!r.open && !isAuthed(req)) return fail(res, 401, 'Sign in required');
         const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
         return await r.handler(req, res, params);
       }
@@ -346,8 +328,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.requestTimeout = 0;
-server.listen(PORT, HOST, () => {
-  console.log(`Tokify: http://localhost:${PORT}`);
-  if (!hasPassword()) console.log('No password set — run: npm run password');
-});
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { await closeBrowser(); process.exit(0); });
+server.listen(PORT, HOST, () => console.log(`Tokify: http://localhost:${PORT}`));
+async function quit() { await closeBrowser(); process.exit(0); }
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, quit);
