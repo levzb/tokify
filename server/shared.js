@@ -19,7 +19,12 @@ const DECLICK = s(0.008);
  * (silence trimmed). `offset` (first item only) starts that track part-way through.
  * Returns entries with absolute stream positions plus envelope info for the renderer.
  */
-export function buildTimeline(items, mode = 'none') {
+/** How long two songs overlap in a crossfade, in seconds: a setting, the same on both sides of the stream. */
+export const XFADE = { min: 0.5, max: 12, def: 1.5 };
+export const xfadeSec = (v) => (Number.isFinite(+v) && v !== null && v !== '' ? Math.min(XFADE.max, Math.max(XFADE.min, +v)) : XFADE.def);
+
+export function buildTimeline(items, mode = 'none', xfade = XFADE.def) {
+  const over = xfadeSec(xfade);
   const entries = [];
   let cursor = 0;
   for (let i = 0; i < items.length; i++) {
@@ -32,7 +37,7 @@ export function buildTimeline(items, mode = 'none') {
     let fadeIn = offset > 0 ? s(0.12) : DECLICK;
     if (prev) {
       if (mode === 'crossfade') {
-        const x = Math.min(s(1.5), Math.floor(prev.len / 3), Math.floor(len / 3));
+        const x = Math.min(s(over), Math.floor(prev.len / 3), Math.floor(len / 3));
         start = prev.start + prev.len - x;
         prev.fadeOut = x;
         fadeIn = x;
@@ -51,7 +56,7 @@ export function buildTimeline(items, mode = 'none') {
   const audioEnd = last ? last.start + last.len : 0;
   const total = audioEnd + TAIL;
   const frames = Math.ceil((total + STREAM_DELAY) / FRAME) + 2;
-  return { entries, total, audioEnd, frames, bytes: frames * FRAME_BYTES, mode };
+  return { entries, total, audioEnd, frames, bytes: frames * FRAME_BYTES, mode, xfade: over };
 }
 
 /** Plan position (samples) for a media-element currentTime (seconds). */
@@ -168,8 +173,42 @@ export function musicFromTikTokData(data, videoId = null) {
   };
 }
 
-export const TRACK_ID_RE = /^(?:\d{1,22}|file-[a-f0-9]{64}|yt-[A-Za-z0-9_-]{11}|sc-\d{1,22})$/;
+export const TRACK_ID_RE = /^(?:\d{1,22}|file-[a-f0-9]{64}|yt-[A-Za-z0-9_-]{11}|sc-\d{1,22}|sp-[A-Za-z0-9]{22})$/;
 export const providerName = (p) => ({tiktok:'TikTok',youtube:'YouTube',soundcloud:'SoundCloud',spotify:'Spotify',external:'File'}[p] || 'Audio');
+
+/**
+ * A whole playlist: a YouTube or YouTube Music playlist, a SoundCloud set (or album), a Spotify playlist or album.
+ * Returns null for anything else (a single song is parseMediaLink's job). A video opened from inside a playlist
+ * (watch?v=…&list=…) stays that one video.
+ */
+export function parsePlaylistLink(input) {
+  if (typeof input !== 'string' || input.length > 5000) return null;
+  const match = input.trim().match(/https?:\/\/[^\s<>"“”]+/i);
+  let u; try { u = new URL((match?.[0] || input.trim()).replace(/[),.!;]+$/, '')); } catch { return null; }
+  if (!['https:', 'http:'].includes(u.protocol) || u.username || u.password || u.port) return null;
+  const host = u.hostname.toLowerCase();
+  if (['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'].includes(host) && u.pathname.replace(/\/$/, '') === '/playlist') {
+    const id = u.searchParams.get('list') || '';
+    if (!/^[A-Za-z0-9_-]{10,80}$/.test(id)) return null;
+    // Mixes go on for ever; Liked and Watch later belong to a signed-in account.
+    if (/^(RD|UL|LL|WL)/.test(id)) throw new Error('This is a YouTube mix or a personal list. Paste a regular playlist link.');
+    return { provider: 'youtube', kind: 'playlist', id, url: `https://www.youtube.com/playlist?list=${id}` };
+  }
+  if (['soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com'].includes(host)) {
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length < 3 || parts.length > 4 || parts[1] !== 'sets' || !/^[A-Za-z0-9_-]+$/.test(parts[0] + parts[2])) return null;
+    if (parts[3] && !/^s-[A-Za-z0-9]+$/.test(parts[3])) return null;
+    return { provider: 'soundcloud', kind: 'playlist', id: parts.slice(0, 4).join('/'), url: `https://soundcloud.com/${parts.slice(0, 4).join('/')}` };
+  }
+  if (host === 'open.spotify.com') {
+    const m = /^\/(?:intl-[a-z-]+\/)?(?:embed\/)?(playlist|album)\/([A-Za-z0-9]{22})\/?$/.exec(u.pathname);
+    if (!m) return null;
+    return { provider: 'spotify', kind: m[1], id: m[2], url: `https://open.spotify.com/${m[1]}/${m[2]}` };
+  }
+  return null;
+}
+/** Share links that only say where to go (the app's "Copy link"); the server follows them to see what they are. */
+export const isShortLink = (input) => /^https?:\/\/(on\.soundcloud\.com|soundcloud\.app\.goo\.gl|spotify\.link)\//i.test(String(input || '').trim().match(/https?:\/\/\S+/i)?.[0] || '');
 
 /** Only individual media links from explicitly supported hosts reach the server. */
 export function parseMediaLink(input) {
@@ -181,8 +220,14 @@ export function parseMediaLink(input) {
   if(['tiktok.com','www.tiktok.com','m.tiktok.com','vm.tiktok.com','vt.tiktok.com'].includes(host))return {...parseTikTokLink(u.href),provider:'tiktok'};
   if(['youtube.com','www.youtube.com','m.youtube.com','music.youtube.com','youtu.be','www.youtu.be'].includes(host)){
     let id=host.endsWith('youtu.be')?u.pathname.split('/')[1]:u.pathname==='/watch'?u.searchParams.get('v'):/^\/(?:shorts|live|embed)\/([^/]+)\/?$/.exec(u.pathname)?.[1];
-    if(!/^[A-Za-z0-9_-]{11}$/.test(id || ''))throw new Error('Paste an individual YouTube video link, not a channel or playlist');
+    if(!/^[A-Za-z0-9_-]{11}$/.test(id || ''))throw new Error('Paste a YouTube video or playlist link, not a channel');
     return {provider:'youtube',mediaId:id,musicId:'yt-'+id,url:`https://www.youtube.com/watch?v=${id}`};
+  }
+  // Long sets list some songs only by number; the downloader finds those by it.
+  if(['api.soundcloud.com','api-v2.soundcloud.com'].includes(host)){
+    const id=/^\/tracks\/(\d{1,22})\/?$/.exec(u.pathname)?.[1];
+    if(!id)throw new Error('Paste an individual SoundCloud track link');
+    return {provider:'soundcloud',url:`https://api.soundcloud.com/tracks/${id}`,musicId:'sc-'+id};
   }
   if(['soundcloud.com','www.soundcloud.com','m.soundcloud.com','on.soundcloud.com','soundcloud.app.goo.gl'].includes(host)){
     if(['on.soundcloud.com','soundcloud.app.goo.gl'].includes(host)){
@@ -190,13 +235,13 @@ export function parseMediaLink(input) {
       u.search='';return {provider:'soundcloud',url:u.href,musicId:null};
     }
     const parts=u.pathname.split('/').filter(Boolean);
-    if(parts.length<2 || parts.length>3 || ['sets','likes','tracks','albums','reposts','popular-tracks','following','followers'].includes(parts[1]) || (parts.length===3&&!/^s-[A-Za-z0-9]+$/.test(parts[2])))throw new Error('Paste an individual SoundCloud track link, not a profile or playlist');
+    if(parts.length<2 || parts.length>3 || ['sets','likes','tracks','albums','reposts','popular-tracks','following','followers'].includes(parts[1]) || (parts.length===3&&!/^s-[A-Za-z0-9]+$/.test(parts[2])))throw new Error('Paste a SoundCloud track or playlist link, not a profile');
     const secret=u.searchParams.get('secret_token');u.search='';if(secret&&/^s-[A-Za-z0-9]+$/.test(secret))u.searchParams.set('secret_token',secret);
     return {provider:'soundcloud',url:u.href,musicId:null};
   }
   if(host==='open.spotify.com'){
     const id=/^\/(?:intl-[a-z-]+\/)?(?:embed\/)?track\/([A-Za-z0-9]{22})\/?$/.exec(u.pathname)?.[1];
-    if(!id)throw new Error('Paste an individual Spotify track link, not an album or playlist');
+    if(!id)throw new Error('Paste a Spotify track, playlist or album link');
     return {provider:'spotify',mediaId:id,musicId:null,url:`https://open.spotify.com/track/${id}`};
   }
   if(host==='spotify.link'){

@@ -5,13 +5,15 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
-import { db, uid, tx, ROOT, DIRS } from './db.js';
+import { db, uid, tx, ROOT, DIRS, DATA } from './db.js';
 import { createImport, retryTrack, jobStatus, listJobs, startFileJob, receiveFile, scanFile, commitFile, stagedFile, discardStagedFile,
-  previewLink, downloadLink, linkPreviewCover, searchSpotifyLink } from './imports.js';
+  previewLink, downloadLink, linkPreviewCover, searchSpotifyLink, searchSongs, importPlaylist, playlistPreviewCover } from './imports.js';
 import { createSession, serveStream, createExport, exportJob, recentExports, exportReport, serveExport } from './stream.js';
 import { normalizeImage, coverColor, customPath, clipInfo, setClip, serveClipSource } from './audio.js';
-import { shutdown as closeBrowser } from './sources.js';
-import { TRACK_ID_RE } from './shared.js';
+import { shutdown as closeBrowser, youtubeThumb, previewClip } from './sources.js';
+import { TRACK_ID_RE, parseMediaLink } from './shared.js';
+import { lyricsOf, findLyrics } from './lyrics.js';
+import { loadPlugins, listPlugins, updatePlugin, runAction, pluginRequest } from './plugins.js';
 
 const PORT = Number(process.env.PORT || 8788);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -56,6 +58,7 @@ function trackOut(t) {
     cover: t.custom_cover ? mediaUrl('c', t.custom_cover, t.ver) : t.cover_file ? mediaUrl('t', t.cover_file, t.ver) : null,
     customCover: !!t.custom_cover,
     origin: t.origin, filename: t.original_name || '',
+    start: (t.trim_start || 0)/48000, // where the song starts in its recording (synced lyrics count from the recording)
     clipped: t.clip_start !== null, clipStart: (t.clip_start ?? 0)/48000, clipEnd: t.clip_end === null ? null : t.clip_end/48000, originalDuration: (t.base_samples ?? t.samples)/48000,
   };
 }
@@ -65,7 +68,7 @@ function library() {
   const pls = db.prepare("SELECT * FROM playlists ORDER BY CASE WHEN kind='external' THEN 0 ELSE 1 END, created ASC").all();
   const pt = db.prepare('SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY pos ASC');
   const playlists = pls.map((p) => ({
-    id: p.id, name: p.name, kind: p.kind, shuffle: !!p.shuffle, transition: p.transition, created: p.created,
+    id: p.id, name: p.name, kind: p.kind, origin: p.origin || null, link: p.link || null, shuffle: !!p.shuffle, transition: p.transition, created: p.created,
     cover: p.custom_cover ? mediaUrl('c', p.custom_cover, p.ver) : null,
     trackIds: pt.all(p.id).map((r) => r.track_id),
   }));
@@ -112,6 +115,11 @@ const route = (method, pattern, handler) => {
 route('GET', '/api/ping', (req, res) => send(res, 200, { ok: true }));
 route('POST', '/api/quit', (req, res) => { send(res, 200, { ok: true }); setImmediate(quit); });
 route('GET', '/api/library', (req, res) => send(res, 200, library()));
+route('GET', '/api/storage', async (req, res) => send(res, 200, await storage()));
+// Plugins (server/plugins.js): the list for Settings, turning one on or off, its settings and its actions.
+route('GET', '/api/plugins', (req, res) => send(res, 200, { plugins: listPlugins() }));
+route('PATCH', '/api/plugins/:id', async (req, res, { id }) => send(res, 200, await updatePlugin(id, await readJSON(req, 20000))));
+route('POST', '/api/plugins/:id/actions/:action', async (req, res, { id, action }) => send(res, 200, await runAction(id, action, await readJSON(req, 10000))));
 route('POST', '/api/exports', async (req, res) => send(res, 200, createExport(await readJSON(req))));
 route('GET', '/api/exports', (req, res) => send(res, 200, { jobs: recentExports() }));
 route('GET', '/api/exports/:id', (req, res, { id }) => { const job=exportJob(id); return job ? send(res,200,job) : fail(res,404,'Download not found'); });
@@ -122,6 +130,31 @@ route('GET', '/api/exports/:id/report', (req,res,{id}) => send(res,200,exportRep
 route('POST', '/api/links/resolve', async (req,res) => { const {link}=await readJSON(req,10000);send(res,200,await previewLink(link)); });
 route('POST', '/api/links/download', async (req,res) => { const {token}=await readJSON(req,10000);send(res,200,downloadLink(token)); });
 route('POST', '/api/links/spotify/search', async (req,res) => { const {token}=await readJSON(req,10000);send(res,200,await searchSpotifyLink(token)); });
+route('POST', '/api/search', async (req,res) => { const {q}=await readJSON(req,10000);send(res,200,await searchSongs(q)); });
+route('GET', '/api/search/thumb/:id', async (req,res,{id}) => {
+  const image=await youtubeThumb(id,new URL(req.url,'http://x').searchParams.get('s'));if(!image)return fail(res,404,'Cover unavailable');
+  res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, max-age=86400','Content-Length':image.length});res.end(image);
+});
+// 30-second previews of YouTube and SoundCloud tracks, before anything is downloaded.
+const previewable = (raw) => { try { const l = parseMediaLink(String(raw || '')); return ['youtube', 'soundcloud'].includes(l.provider) ? l.url : null; } catch { return null; } };
+route('POST', '/api/preview/warm', async (req,res) => { const {url,duration}=await readJSON(req,10000);const u=previewable(url);if(u)previewClip(u,Number(duration)||0).catch(()=>{});send(res,200,{ok:!!u}); });
+route('GET', '/api/preview', async (req,res) => {
+  const q=new URL(req.url,'http://x').searchParams,u=previewable(q.get('url'));
+  if(!u)return fail(res,400,'No preview for this source');
+  let clip;try{clip=await previewClip(u,Number(q.get('d'))||0);}catch(e){return fail(res,502,e.message);}
+  const m=/^bytes=(\d*)-(\d*)$/.exec(req.headers.range||'');
+  const head={'Content-Type':'audio/mpeg','Cache-Control':'no-store','Accept-Ranges':'bytes'};
+  if(!m){res.writeHead(200,{...head,'Content-Length':clip.length});return res.end(clip);}
+  let a=m[1]===''?clip.length-Number(m[2]):Number(m[1]),b=m[1]!==''&&m[2]!==''?Number(m[2]):clip.length-1;
+  a=Math.max(0,a);b=Math.min(clip.length-1,b);
+  if(a>b){res.writeHead(416,{'Content-Range':`bytes */${clip.length}`});return res.end();}
+  res.writeHead(206,{...head,'Content-Range':`bytes ${a}-${b}/${clip.length}`,'Content-Length':b-a+1});res.end(clip.subarray(a,b+1));
+});
+route('POST', '/api/links/playlist/import', async (req,res) => { const {token}=await readJSON(req,10000);send(res,200,await importPlaylist(token)); });
+route('GET', '/api/links/playlists/:token/cover', async (req,res,{token}) => {
+  const image=await playlistPreviewCover(token);if(!image)return fail(res,404,'Cover unavailable');
+  res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, no-store','Content-Length':image.length});res.end(image);
+});
 route('GET', '/api/links/previews/:token/cover', async (req,res,{token}) => {
   const image=await linkPreviewCover(token);if(!image)return fail(res,404,'Cover unavailable');
   res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, no-store','Content-Length':image.length});res.end(image);
@@ -150,6 +183,8 @@ route('GET', '/api/tracks/:id/clip', async (req,res,{id}) => send(res,200,await 
 route('PATCH', '/api/tracks/:id/clip', async (req,res,{id}) => send(res,200,setClip(id,await readJSON(req,10000))));
 route('GET', '/api/tracks/:id/source', (req,res,{id}) => serveClipSource(req,res,id));
 route('HEAD', '/api/tracks/:id/source', (req,res,{id}) => serveClipSource(req,res,id));
+route('GET', '/api/tracks/:id/lyrics', (req,res,{id}) => send(res,200,lyricsOf(id)));
+route('POST', '/api/tracks/:id/lyrics', async (req,res,{id}) => send(res,200,await findLyrics(id, { listen: (await readJSON(req, 1000)).listen === true })));
 route('PATCH', '/api/tracks/:id', async (req, res, { id }) => {
   const t = db.prepare('SELECT title,author FROM tracks WHERE id=?').get(id);
   if (!t) return fail(res, 404, 'Song not found');
@@ -275,9 +310,36 @@ route('DELETE', '/api/tracks/:id/cover', async (req, res, { id }) => {
 });
 
 route('POST', '/api/sessions', async (req, res) => {
-  const { id, items, mode } = await readJSON(req);
-  send(res, 200, createSession(String(id), { items: Array.isArray(items) ? items : [], mode }));
+  const { id, items, mode, xfade } = await readJSON(req);
+  send(res, 200, createSession(String(id), { items: Array.isArray(items) ? items : [], mode, xfade }));
 });
+
+// ---------- storage (Settings → Library) ----------
+// What the data folder holds, by kind, and what is left on its disk. Walked without blocking; kept 20 s.
+let storageCache = null;
+async function folderSize(dir) {
+  let n = 0;
+  let list;
+  try { list = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return 0; }
+  for (const d of list) {
+    const p = path.join(dir, d.name);
+    if (d.isDirectory()) n += await folderSize(p);
+    else if (d.isFile()) { try { n += (await fs.promises.stat(p)).size; } catch {} }
+  }
+  return n;
+}
+async function storage() {
+  if (storageCache && Date.now() - storageCache.at < 20000) return storageCache.v;
+  const music = await folderSize(DIRS.audio);
+  const covers = (await folderSize(DIRS.covers)) + (await folderSize(DIRS.custom));
+  const downloads = await folderSize(path.join(DATA, 'exports'));
+  const total = await folderSize(DATA);
+  let free = null;
+  try { const st = fs.statfsSync(DATA); free = st.bavail * st.bsize; } catch {}
+  const v = { music, covers, downloads, other: Math.max(0, total - music - covers - downloads), total, free };
+  storageCache = { at: Date.now(), v };
+  return v;
+}
 
 // ---------- server ----------
 // Without a password, other websites open in the same browser must not reach the library:
@@ -315,6 +377,8 @@ const server = http.createServer(async (req, res) => {
         const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
         return await r.handler(req, res, params);
       }
+      const own = await pluginRequest(req.method, p, Object.fromEntries(url.searchParams), () => readJSON(req, 1_000_000));
+      if (own) return send(res, 200, own.value);
       return fail(res, 404, 'Not found');
     }
     // static app
@@ -328,6 +392,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.requestTimeout = 0;
+await loadPlugins().catch((e) => console.error('[plugins]', e.message));
 server.listen(PORT, HOST, () => console.log(`Tokify: http://localhost:${PORT}`));
 async function quit() { await closeBrowser(); process.exit(0); }
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, quit);

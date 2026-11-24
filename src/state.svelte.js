@@ -19,6 +19,10 @@ export const ui = $state({
   downloadOpen: false,
   downloadSource: null,
   clipTrackId: null,
+  lyricsOpen: false,
+  soundOpen: false,
+  soundTrackId: null,
+  lyricsTrackId: null, // null: the lyrics follow the song that is playing
   libraryView: 'imports',
   search: '',
 });
@@ -27,16 +31,19 @@ function parseHash() {
   const h = location.hash.replace(/^#\/?/, '');
   const [name, id] = h.split('/');
   if (name === 'p' && id) return { name: 'playlist', id: decodeURIComponent(id) };
+  if (name === 'settings') return { name: 'settings', id: null };
   return { name: 'home', id: null };
 }
 ui.route = parseHash();
 addEventListener('hashchange', () => {
+  const left = ui.route;
   ui.route = parseHash();
+  if (left.name === 'playlist' && left.id !== ui.route.id) discardDraft(left.id);
   ui.menu = null;
   document.querySelector('.main-scroll')?.scrollTo({ top: 0 });
 });
 
-export const go = (name, id) => { location.hash = name === 'playlist' ? `#/p/${encodeURIComponent(id)}` : '#/'; };
+export const go = (name, id) => { location.hash = name === 'playlist' ? `#/p/${encodeURIComponent(id)}` : name === 'settings' ? '#/settings' : '#/'; };
 
 let toastTimer;
 export function toast(text, { action, onAction, ms = 2600 } = {}) {
@@ -102,11 +109,24 @@ const guard = async (fn, msg) => {
   try { return await fn(); } catch (e) { toast(e.message || msg); await load().catch(() => {}); throw e; }
 };
 
+// A playlist made with "New playlist" stays a draft until it gets a name, a cover or a song.
+// Leaving it untouched removes it, so stray clicks don't pile up "My playlist #7".
+const drafts = new Map(); // id -> the name it was given
+
 export async function createPlaylist(name, trackIds = []) {
   const n = lib.playlists.filter((p) => p.kind === 'custom').length + 1;
-  const { id } = await guard(() => api('/api/playlists', { method: 'POST', body: { name: name || `My playlist #${n}`, trackIds } }));
+  const given = name || `My playlist #${n}`;
+  const { id } = await guard(() => api('/api/playlists', { method: 'POST', body: { name: given, trackIds } }));
+  if (!name && !trackIds.length) drafts.set(id, given);
   await load();
   return id;
+}
+
+async function discardDraft(id) {
+  if (!drafts.has(id)) return;
+  const given = drafts.get(id), pl = playlistById(id);
+  drafts.delete(id);
+  if (pl && pl.name === given && !pl.cover && !pl.trackIds.length) await deletePlaylist(id).catch(() => {});
 }
 
 export async function patchPlaylist(id, patch) {
@@ -179,6 +199,12 @@ export async function startImport(name, items) {
   ui.importJob = { jobId, playlistId, name, total: items.length, done: 0, ok: 0, failed: 0, reused: 0, finished: false, items: {}, order: items.map((i) => i.musicId) };
   await load();
   poll();
+}
+
+/** Shows the progress of an import the server has started (a whole playlist from a link). */
+export function followImport({ jobId, playlistId, name, total, order }) {
+  ui.importJob = { jobId, playlistId, name, total, done: 0, ok: 0, failed: 0, reused: 0, finished: false, items: {}, order };
+  load().catch(() => {}).finally(poll);
 }
 
 export async function restoreImport() {

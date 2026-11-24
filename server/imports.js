@@ -7,8 +7,11 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { db, uid, tx, DIRS } from './db.js';
 import { run, analyze, normalizeImage, coverColor, coverPath, audioPath, analysisWithClip } from './audio.js';
-import { soundInfo, download, SoundError, resolveTikTokLink, rememberSound, runDownloader, resolveMediaSite, fetchMediaCover, MAX_MEDIA_SECONDS, resolveSpotify, spotifyYouTubeMatches } from './sources.js';
-import { parseMediaLink, mediaFileError } from './shared.js';
+import { soundInfo, download, SoundError, resolveTikTokLink, rememberSound, runDownloader, resolveMediaSite, fetchMediaCover, MAX_MEDIA_SECONDS, resolveSpotify, spotifyYouTubeMatches, youtubeSearch,
+  fetchPlaylist, expandLink, findRecordings, soundcloudRecordings, spotifyCover } from './sources.js';
+import { parseMediaLink, parsePlaylistLink, isShortLink, mediaFileError } from './shared.js';
+import { saveSyncedLyrics } from './lyrics.js';
+import { emit } from './plugins.js';
 
 // ---------- job queue ----------
 const jobs = new Map();
@@ -120,6 +123,7 @@ async function processTrack(id) {
   if (existing?.status === 'ok' && existing.audio_file && fs.existsSync(audioPath(existing.audio_file))) return true;
   if (existing?.origin === 'external') return processExternalTrack(id);
   if (['youtube','soundcloud'].includes(existing?.origin)) return processMediaTrack(id);
+  if (existing?.origin === 'spotify') return processSpotifyTrack(id);
   let info;
   for (let attempt = 0; attempt < 2; attempt++) {
     try { info = await soundInfo(id); break; }
@@ -151,6 +155,7 @@ async function processTrack(id) {
   db.prepare(`UPDATE tracks SET status = 'ok', error = NULL, title = COALESCE(title_override, ?), author = COALESCE(author_override, ?), samples = ?, trim_start = ?, gain = ?,
     audio_file = ?, cover_file = COALESCE(?, cover_file), color = ?, base_trim_start=?,base_samples=?,clip_start=?,clip_end=?, ver = ver + 1 WHERE id = ?`)
     .run(info.title, info.author, a.samples, a.trimStart, a.gain, audioFile, coverFile, color, a.baseStart,a.baseSamples,a.clipStart,a.clipEnd, id);
+  emit('track.ready', id);
   return false;
 }
 
@@ -177,19 +182,65 @@ export async function processMediaTrack(id){
   try{
     const info=await resolveMediaSite(link);
     if(info.musicId!==id)throw new SoundError('The link now points to a different track');
-    db.prepare('UPDATE tracks SET title=COALESCE(title_override,?),author=COALESCE(author_override,?) WHERE id=?').run(info.title,info.author,id);
-    await runDownloader(['-f','bestaudio/best[height<=480]','--max-filesize','512M','--match-filter','!is_live & duration <= 2700',
-      '--extract-audio','--audio-format','m4a','--audio-quality','192K','--output',path.join(work,'audio.%(ext)s'),info.sourceUrl],{timeout:12*60_000,maxBytes:1<<20});
-    const downloaded=path.join(work,'audio.m4a');if(!fs.existsSync(downloaded))throw new SoundError('No playable audio was downloaded');
-    const probe=await run('ffprobe',['-v','error','-show_entries','format=duration','-of','json',downloaded],{maxBytes:10000});
-    const seconds=Number(JSON.parse(probe.stdout.toString()).format?.duration || 0);
-    if(seconds<info.duration-Math.max(5,info.duration*.15))throw new SoundError('The source returned only part of this recording. The full track is unavailable.');
-    if(seconds>MAX_MEDIA_SECONDS+5)throw new SoundError('Maximum length is 45 minutes per track');
-    const a=analysisWithClip(id,await analyze(downloaded));const audioFile=id+'.m4a';fs.renameSync(downloaded,audioPath(audioFile));
-    let coverFile=null,color=t.color || '#ffffff';
-    if(info.coverUrl){const tmp=path.join(work,'cover');try{await fetchMediaCover(info.coverUrl,tmp);coverFile=id+'.jpg';await normalizeImage(tmp,coverPath(coverFile));color=await coverColor(coverPath(coverFile));}catch{coverFile=null;}}
+    db.prepare('UPDATE tracks SET title=COALESCE(title_override,?),author=COALESCE(author_override,?),link=? WHERE id=?').run(info.title,info.author,info.sourceUrl||t.link,id);
+    const {file}=await downloadRecording(info.sourceUrl,info.duration,work);
+    const a=analysisWithClip(id,await analyze(file));const audioFile=id+'.m4a';fs.renameSync(file,audioPath(audioFile));
+    const {coverFile,color}=await saveCover(id,info.coverUrl,work,t.color);
     db.prepare(`UPDATE tracks SET status='ok',error=NULL,title=COALESCE(title_override,?),author=COALESCE(author_override,?),samples=?,trim_start=?,gain=?,audio_file=?,cover_file=COALESCE(?,cover_file),color=?,base_trim_start=?,base_samples=?,clip_start=?,clip_end=?,ver=ver+1 WHERE id=?`)
       .run(info.title,info.author,a.samples,a.trimStart,a.gain,audioFile,coverFile,color,a.baseStart,a.baseSamples,a.clipStart,a.clipEnd,id);
+    emit('track.ready',id);
+    return false;
+  }finally{fs.rmSync(work,{recursive:true,force:true});}
+}
+// The whole recording from a YouTube or SoundCloud page into work/audio.m4a, refusing previews and cut versions.
+async function downloadRecording(url,duration,work){
+  const file=path.join(work,'audio.m4a');fs.rmSync(file,{force:true});
+  await runDownloader(['-f','bestaudio/best[height<=480]','--max-filesize','512M','--match-filter','!is_live & duration <= 2700',
+    '--extract-audio','--audio-format','m4a','--audio-quality','192K','--output',path.join(work,'audio.%(ext)s'),url],{timeout:12*60_000,maxBytes:1<<20});
+  if(!fs.existsSync(file))throw new SoundError('No playable audio was downloaded');
+  const probe=await run('ffprobe',['-v','error','-show_entries','format=duration','-of','json',file],{maxBytes:10000});
+  const seconds=Number(JSON.parse(probe.stdout.toString()).format?.duration || 0);
+  if(duration&&seconds<duration-Math.max(5,duration*.15))throw new SoundError('The source returned only part of this recording. The full track is unavailable.');
+  if(seconds>MAX_MEDIA_SECONDS+5)throw new SoundError('Maximum length is 45 minutes per track');
+  return {file,seconds};
+}
+async function saveCover(id,url,work,fallbackColor){
+  let coverFile=null,color=fallbackColor || '#ffffff';
+  if(url){const tmp=path.join(work,'cover');try{await fetchMediaCover(url,tmp);coverFile=id+'.jpg';await normalizeImage(tmp,coverPath(coverFile));color=await coverColor(coverPath(coverFile));}catch{coverFile=null;}}
+  return {coverFile,color};
+}
+
+// ---------- Spotify songs (from a playlist) ----------
+// Spotify names the song; the audio is the matching recording on YouTube (or SoundCloud), found once and
+// remembered. The song keeps Spotify's title, artist and cover, and gets its synced lyrics when LRCLIB has them.
+export const spotifyMeta=(t)=>{try{return JSON.parse(t.meta||'{}')||{};}catch{return {};}};
+async function processSpotifyTrack(id){
+  const t=db.prepare('SELECT * FROM tracks WHERE id=?').get(id);
+  const meta=spotifyMeta(t),want={title:meta.title||t.title,author:meta.author||t.author,duration:meta.duration||0};
+  const work=path.join(DIRS.tmp,`${id}-${uid()}`);fs.mkdirSync(work,{recursive:true});
+  try{
+    // The remembered recording, else the best few; when YouTube refuses them all (an age limit, a block),
+    // SoundCloud's versions get their turn.
+    const tried=new Set();let got,last;
+    const attempt=async(list)=>{
+      for(const c of list.slice(0,3)){
+        if(got||tried.has(c.url))continue;tried.add(c.url);
+        try{got=await downloadRecording(c.url,want.duration,work);got.source=c;db.prepare('UPDATE tracks SET source_url=? WHERE id=?').run(c.url,id);}
+        catch(e){if(!(e instanceof SoundError))throw e;last=e;}
+      }
+    };
+    await attempt(t.source_url?[{url:t.source_url}]:await findRecordings(want));
+    if(!got&&!t.source_url)await attempt(await soundcloudRecordings(want));
+    if(!got)throw last||new SoundError('No recording of this song was found on YouTube or SoundCloud');
+    const a=analysisWithClip(id,await analyze(got.file));const audioFile=id+'.m4a';fs.renameSync(got.file,audioPath(audioFile));
+    if(!meta.cover&&meta.spotifyId){meta.cover=await spotifyCover(meta.spotifyId);if(meta.cover)db.prepare('UPDATE tracks SET meta=? WHERE id=?').run(JSON.stringify(meta),id);}
+    const ytId=/[?&]v=([A-Za-z0-9_-]{11})/.exec(t.source_url||got.source.url||'')?.[1];
+    const {coverFile,color}=await saveCover(id,meta.cover||(ytId?`https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`:''),work,t.color);
+    db.prepare(`UPDATE tracks SET status='ok',error=NULL,samples=?,trim_start=?,gain=?,audio_file=?,cover_file=COALESCE(?,cover_file),color=?,base_trim_start=?,base_samples=?,clip_start=?,clip_end=?,ver=ver+1 WHERE id=?`)
+      .run(a.samples,a.trimStart,a.gain,audioFile,coverFile,color,a.baseStart,a.baseSamples,a.clipStart,a.clipEnd,id);
+    // Words are a bonus: a song without them is still a song.
+    await saveSyncedLyrics(id,want,got.seconds).catch((e)=>console.error('[lyrics]',id,e.message));
+    emit('track.ready',id);
     return false;
   }finally{fs.rmSync(work,{recursive:true,force:true});}
 }
@@ -357,7 +408,7 @@ export async function processExternalTrack(id) {
   a=analysisWithClip(id,a);
   db.prepare(`UPDATE tracks SET status='ok',error=NULL,samples=?,trim_start=?,gain=?,audio_file=?,cover_file=COALESCE(?,cover_file),color=?,original_file=NULL,base_trim_start=?,base_samples=?,clip_start=?,clip_end=?,ver=ver+1 WHERE id=?`)
     .run(a.samples,a.trimStart,a.gain,audioFile,coverFile,color,a.baseStart,a.baseSamples,a.clipStart,a.clipEnd,id);
-  fs.rmSync(src,{force:true});return false;
+  fs.rmSync(src,{force:true});emit('track.ready',id);return false;
 }
 
 // ---------- single links (search first, then import) ----------
@@ -367,9 +418,14 @@ const readyTrack = (id) => {
   return t?.audio_file && fs.existsSync(audioPath(t.audio_file)) ? t : null;
 };
 
-export async function previewLink(input, { resolve } = {}) {
-  let link;
-  try { link = parseMediaLink(input); } catch (e) { throw bad(e.message); }
+export async function previewLink(input, { resolve, list } = {}) {
+  let link, pl;
+  try {
+    if (isShortLink(input)) input = await expandLink(input.trim().match(/https?:\/\/\S+/i)[0]);
+    pl = parsePlaylistLink(input);
+    if (pl) return await previewPlaylist(pl, list);
+    link = parseMediaLink(input);
+  } catch (e) { throw e.code ? e : bad(e.message); }
   const known = !link.musicId && db.prepare('SELECT id FROM tracks WHERE link=? AND origin=?').get(link.url,link.provider);
   let t = (link.musicId || known?.id) && readyTrack(link.musicId || known.id), info;
   if (t) info = { musicId: t.id, title: t.title, author: t.author, duration: t.samples / 48000 };
@@ -437,8 +493,78 @@ export function downloadLink(token) {
 }
 
 
+export async function searchSongs(query) {
+  try { return { results: await youtubeSearch(query, 8) }; }
+  catch (e) { throw bad(e.message); }
+}
+
 export async function searchSpotifyLink(token) {
   const p=preview(token);
   try { return { candidates: await spotifyYouTubeMatches(p.info) }; }
   catch(e) { throw bad(e.message); }
+}
+
+// ---------- whole playlists ----------
+// A playlist link shows what is in it first (nothing is saved); importing makes it a playlist in the library
+// and downloads every song not there yet. The playlist remembers its link: importing it again adds what is new
+// and follows the source's order, and songs already in the library are not fetched again.
+const lists = new Map();
+const PLACEHOLDER = { youtube: 'YouTube video', soundcloud: 'SoundCloud track', spotify: 'Spotify song' };
+const linkedPlaylist = (list) => db.prepare('SELECT id,name FROM playlists WHERE origin=? AND link=?').get(list.provider, list.url);
+
+async function previewPlaylist(pl, get = fetchPlaylist) {
+  const list = await get(pl);
+  if (!list.songs.length) throw bad(list.total ? 'None of the songs in this playlist can be downloaded' : 'This playlist is empty');
+  const token = uid();
+  for (const [key, p] of lists) if (p.expires < Date.now()) lists.delete(key);
+  if (lists.size >= 30) lists.delete(lists.keys().next().value);
+  lists.set(token, { list, expires: Date.now() + 30 * 60_000 });
+  const linked = linkedPlaylist(list), inList = new Set(linked ? db.prepare('SELECT track_id FROM playlist_tracks WHERE playlist_id=?').all(linked.id).map((r) => r.track_id) : []);
+  const songs = list.songs.map((s) => ({ id: s.id, title: s.title, author: s.author, duration: s.duration, have: !!readyTrack(s.id) }));
+  return { kind: 'playlist', token, provider: list.provider, listKind: list.kind, sourceUrl: list.url, name: list.name, owner: list.owner,
+    cover: list.cover ? `/api/links/playlists/${token}/cover` : null, total: list.total, unavailable: list.unavailable, songs,
+    playlistId: linked?.id || null, fresh: list.songs.filter((s) => !inList.has(s.id)).length };
+}
+function listOf(token) {
+  const p = typeof token === 'string' && lists.get(token);
+  if (!p || p.expires < Date.now()) { if (p) lists.delete(token); throw bad('This playlist preview expired. Paste the link again.'); }
+  return p;
+}
+export async function playlistPreviewCover(token) {
+  const p = listOf(token);
+  if (!p.list.cover) return null;
+  if (!p.cover) p.cover = (async () => {
+    const tmp = path.join(DIRS.tmp, `list-cover-${token}`), jpg = tmp + '.jpg';
+    try { await fetchMediaCover(p.list.cover, tmp); await normalizeImage(tmp, jpg); return fs.readFileSync(jpg); }
+    catch { return null; }
+    finally { fs.rmSync(tmp, { force: true }); fs.rmSync(jpg, { force: true }); }
+  })();
+  return p.cover;
+}
+
+export async function importPlaylist(token) {
+  const p = listOf(token);
+  if (p.result) return p.result;
+  const { list } = p, now = Date.now(), n = list.songs.length;
+  let playlist;
+  tx(() => {
+    playlist = linkedPlaylist(list);
+    if (!playlist) {
+      playlist = { id: uid(), name: list.name || 'Playlist' };
+      db.prepare("INSERT INTO playlists (id,name,kind,created,transition,origin,link) VALUES (?,?,'import',?,'crossfade',?,?)").run(playlist.id, playlist.name, now, list.provider, list.url);
+    }
+    const ins = db.prepare(`INSERT INTO tracks (id,link,title,author,status,source_name,added,origin,meta) VALUES (?,?,?,?,'pending',?,?,?,?) ON CONFLICT(id) DO NOTHING`);
+    const put = db.prepare('INSERT INTO playlist_tracks (playlist_id,track_id,pos) VALUES (?,?,?) ON CONFLICT(playlist_id,track_id) DO UPDATE SET pos=excluded.pos');
+    list.songs.forEach((s, i) => {
+      const meta = s.spotifyId ? JSON.stringify({ spotifyId: s.spotifyId, title: s.title, author: s.author, duration: s.duration, cover: s.cover || '' }) : null;
+      ins.run(s.id, s.url, s.title || PLACEHOLDER[list.provider], s.author || '', playlist.name, now + (n - i), list.provider, meta);
+      put.run(playlist.id, s.id, i);
+    });
+  });
+  // Everything not downloaded yet, failed ones included.
+  const ready = new Set(list.songs.filter((s) => readyTrack(s.id)).map((s) => s.id));
+  const ids = list.songs.map((s) => s.id).filter((id) => !ready.has(id));
+  let job = ids.length ? [...jobs.values()].find((j) => !j.finished && j.playlistId === playlist.id) : null;
+  if (ids.length && !job) job = startJob(playlist.id, ids, playlist.name, 'playlist');
+  return p.result = { playlistId: playlist.id, name: playlist.name, jobId: job?.id || null, total: ids.length, order: ids, ready: ready.size };
 }

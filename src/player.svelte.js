@@ -2,9 +2,11 @@
 // transitions are baked into the stream, so nothing depends on JS running while the phone is locked.
 // Next/previous are seeks inside the stream. Queue edits start a new session at the current position.
 import { buildTimeline, planPos, streamTime, entryAt, SR } from '../server/shared.js';
-import { lib, playlistById, playable, allSongs, patchPlaylist, toast } from './state.svelte.js';
+import { prefs } from './prefs.svelte.js';
+import { lib, playlistById, playable, allSongs, patchPlaylist, toast, ui } from './state.svelte.js';
 import { api, artistName } from './util.js';
 import { isIOS } from '../iphone/touch.js';
+import { heardFor, bindSound, wakeSound } from './sound.svelte.js';
 
 const KEY = 'tokify.player.v1';
 const store = {
@@ -88,24 +90,25 @@ function startSession(firstId, offset = 0, autoplay = true) {
   const { items, cycles } = buildItems(firstId, Math.max(0, Math.round(offset)));
   const plan = items.filter((it) => playable(lib.tracks[it.id])).map((it) => ({ ...it, samples: lib.tracks[it.id].samples }));
   const mode = transitionOf(ctx.id);
-  const tl = buildTimeline(plan, mode);
+  const tl = buildTimeline(plan, mode, prefs.xfade);
   const id = uuid();
-  session = { id, tl, entries: tl.entries, cycles, sig: signature(tl.entries, 0, mode) };
+  session = { id, tl, entries: tl.entries, cycles, sig: signature(tl.entries, 0, mode, tl.xfade) };
   curIdx = -1;
   retried = false;
   ensureAudio();
   // Set the source and call play() synchronously so iOS counts it as part of the tap.
   audio.src = `/stream/${id}.mp3`;
-  api('/api/sessions', { method: 'POST', body: { id, mode, items: plan.map((p) => ({ id: p.id, offset: p.offset || 0 })) } })
+  api('/api/sessions', { method: 'POST', body: { id, mode, xfade: tl.xfade, items: plan.map((p) => ({ id: p.id, offset: p.offset || 0 })) } })
     .catch((e) => toast(e.message));
   if (autoplay) {
     player.loading = true;
+    wakeSound();
     audio.play().catch((e) => { player.loading = false; if (e.name !== 'AbortError') toast('Tap play again — the browser blocked autoplay'); });
   }
   setEntry(0);
 }
 
-const signature = (entries, from, mode) => mode + '|' + entries.slice(from, from + 80).map((e) => e.id).join(',');
+const signature = (entries, from, mode, xfade) => `${mode}@${mode === 'crossfade' ? xfade : ''}|` + entries.slice(from, from + 80).map((e) => e.id).join(',');
 
 let rebuildTimer = null;
 function scheduleRebuild() {
@@ -120,8 +123,9 @@ function rebuild() {
   const { items } = buildItems(player.trackId, 0);
   const plan = items.filter((it) => playable(lib.tracks[it.id])).map((it) => ({ ...it, samples: lib.tracks[it.id].samples }));
   const mode = transitionOf(ctx.id);
-  const next = signature(buildTimeline(plan, mode).entries, 0, mode);
-  const now = signature(session.entries, curIdx, session.tl.mode);
+  const tl = buildTimeline(plan, mode, prefs.xfade);
+  const next = signature(tl.entries, 0, mode, tl.xfade);
+  const now = signature(session.entries, curIdx, session.tl.mode, session.tl.xfade);
   if (next === now) { computeUpNext(); return; } // nothing ahead changed: keep the stream
   startSession(player.trackId, offset, player.playing);
 }
@@ -204,6 +208,7 @@ export function toggle() {
   if (!player.trackId) return;
   if (!session) { startSession(player.trackId, restoredPos * SR, true); return; }
   if (audio.paused) {
+    wakeSound();
     player.loading = true;
     audio.play().catch(() => { player.loading = false; });
   } else audio.pause();
@@ -289,6 +294,9 @@ export async function setShuffle(cid, on) {
   if (curRef?.t === 'c') curRef = { t: 'c', i: ctx.index, cycle: 0 };
   scheduleRebuild();
 }
+
+/** The crossfade length changed (Settings): the stream ahead is rendered again with it. */
+export function retime() { scheduleRebuild(); }
 
 export async function setTransition(cid, mode) {
   if (cid === 'all') { player.allTransition = mode; persist(); }
@@ -400,7 +408,7 @@ function updateMetadata() {
 }
 function positionState() {
   if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState || !player.dur) return;
-  try { navigator.mediaSession.setPositionState({ duration: player.dur, position: Math.min(player.pos, player.dur), playbackRate: 1 }); } catch {}
+  try { navigator.mediaSession.setPositionState({ duration: player.dur, position: Math.min(player.pos, player.dur), playbackRate: heardFor(player.trackId).speed }); } catch {}
 }
 function bindMediaSession() {
   if (!('mediaSession' in navigator)) return;
@@ -425,6 +433,7 @@ function ensureAudio() {
   audio.style.display = 'none';
   document.body.appendChild(audio);
   audio.volume = player.volume;
+  bindSound(audio, () => player.trackId);
   audio.addEventListener('timeupdate', onTime);
   audio.addEventListener('play', () => { player.playing = true; cancelAnimationFrame(raf); loop(); try { navigator.mediaSession.playbackState = 'playing'; } catch {} });
   audio.addEventListener('playing', () => { player.loading = false; bindMediaSession(); updateMetadata(); });
@@ -484,13 +493,27 @@ export function restore() {
   }
 }
 
-/** Keyboard: space toggles, arrows seek. */
+/** Space plays and pauses wherever the focus is (a button, a slider, a panel, a menu), except in a field where
+ *  you type. It is caught before anything else sees it, so a focused button is not pressed as well. The excerpt
+ *  editor keeps Space for its own preview. Holding it down toggles once. */
+const TOGGLES = /^(checkbox|radio|range|button|submit|reset|color|file|image)$/i;
+const typing = (el) => !!el?.closest?.('textarea, select, [contenteditable]:not([contenteditable="false"])')
+  || (el?.tagName === 'INPUT' && !TOGGLES.test(el.type));
+const spaceForMusic = (e) => e.code === 'Space' && !e.metaKey && !e.ctrlKey && !e.altKey && !typing(e.target) && !ui.clipTrackId;
+addEventListener('keydown', (e) => {
+  if (!spaceForMusic(e)) return;
+  e.preventDefault(); e.stopPropagation();
+  if (!e.repeat) toggle();
+}, true);
+// A button is pressed on Space's release: swallow that too.
+addEventListener('keyup', (e) => { if (spaceForMusic(e)) { e.preventDefault(); e.stopPropagation(); } }, true);
+
+/** Keyboard: arrows seek (Space is above). */
 addEventListener('keydown', (e) => {
   if (e.defaultPrevented) return;
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.code === 'Space') { e.preventDefault(); toggle(); }
-  else if (e.code === 'ArrowRight' && e.shiftKey) { e.preventDefault(); next(); }
+  if (e.code === 'ArrowRight' && e.shiftKey) { e.preventDefault(); next(); }
   else if (e.code === 'ArrowLeft' && e.shiftKey) { e.preventDefault(); prev(); }
   else if (e.code === 'ArrowRight') { e.preventDefault(); seek(Math.min(player.dur, player.pos + 5)); }
   else if (e.code === 'ArrowLeft') { e.preventDefault(); seek(Math.max(0, player.pos - 5)); }

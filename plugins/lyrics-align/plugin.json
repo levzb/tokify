@@ -1,0 +1,18 @@
+{
+  "id": "lyrics-align",
+  "name": "Lyrics alignment",
+  "version": "0.1.0",
+  "api": 1,
+  "description": "Will fit karaoke timings to remixes and short excerpts with AI. A placeholder for now: it plugs in everywhere the real one will, and does nothing to your lyrics.",
+  "server": "server.js",
+  "enabled": false,
+  "settings": [
+    { "key": "accuracy", "type": "choice", "label": "Accuracy", "options": ["Fast", "Precise"], "default": "Fast", "help": "Precise will take longer and need a bigger model." },
+    { "key": "background", "type": "toggle", "label": "Align new songs in the background", "default": false },
+    { "key": "maxMinutes", "type": "number", "label": "Longest song to align", "min": 1, "max": 15, "step": 1, "unit": "min", "default": 6 }
+  ],
+  "actions": [
+    { "id": "check", "label": "Check the setup", "scope": "plugin" },
+    { "id": "align", "label": "Align lyrics", "scope": "song", "icon": "lyrics" }
+  ]
+}

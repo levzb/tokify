@@ -61,8 +61,15 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
 `);
 
 const trackColumns = new Set(db.prepare('PRAGMA table_info(tracks)').all().map((c) => c.name));
-for (const [name, definition] of [['origin', "TEXT NOT NULL DEFAULT 'tiktok'"], ['original_name', 'TEXT'], ['original_file', 'TEXT'], ['title_override', 'TEXT'], ['author_override', 'TEXT'], ['base_trim_start', 'INTEGER'], ['base_samples', 'INTEGER'], ['clip_start', 'INTEGER'], ['clip_end', 'INTEGER']]) {
+for (const [name, definition] of [['origin', "TEXT NOT NULL DEFAULT 'tiktok'"], ['original_name', 'TEXT'], ['original_file', 'TEXT'], ['title_override', 'TEXT'], ['author_override', 'TEXT'], ['base_trim_start', 'INTEGER'], ['base_samples', 'INTEGER'], ['clip_start', 'INTEGER'], ['clip_end', 'INTEGER'],
+  // A Spotify song: its details as Spotify gave them (JSON), and the YouTube recording its audio came from.
+  ['meta', 'TEXT'], ['source_url', 'TEXT']]) {
   if (!trackColumns.has(name)) db.exec(`ALTER TABLE tracks ADD COLUMN ${name} ${definition}`);
+}
+// A playlist imported from a link remembers where it came from, so importing it again adds what is new.
+const playlistColumns = new Set(db.prepare('PRAGMA table_info(playlists)').all().map((c) => c.name));
+for (const [name, definition] of [['origin', 'TEXT'], ['link', 'TEXT']]) {
+  if (!playlistColumns.has(name)) db.exec(`ALTER TABLE playlists ADD COLUMN ${name} ${definition}`);
 }
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS one_external_upload ON playlists(kind) WHERE kind = 'external'");
 

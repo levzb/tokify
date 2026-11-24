@@ -13,6 +13,7 @@ import { Zip, ZipPassThrough } from 'fflate';
 import { db, DATA, DIRS } from './db.js';
 import { run, decode, audioPath, coverPath, customPath } from './audio.js';
 import { buildTimeline, envelope, SR, FRAME, FRAME_BYTES, entryAt } from './shared.js';
+import { cleanSound, isNeutral, ffmpegGraph, impulseWav, soundLabel } from './effects.js';
 
 const K = 250; // frames per chunk (6 s)
 const PRE = 4, POST = 4; // encoder pre/post roll in frames
@@ -65,7 +66,7 @@ const sessions = new Map();
 const waiters = new Map();
 const MAX_SESSIONS = 24;
 
-export function createSession(id, { items, mode }, { store = true } = {}) {
+export function createSession(id, { items, mode, xfade }, { store = true } = {}) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw Object.assign(new Error('Invalid session ID'), { code: 400 });
   const rows = new Map();
   const q = db.prepare("SELECT id, samples, trim_start, gain, audio_file, ver FROM tracks WHERE id = ? AND status = 'ok'");
@@ -77,7 +78,7 @@ export function createSession(id, { items, mode }, { store = true } = {}) {
     if (r && r.samples > 0) plan.push({ id: r.id, samples: r.samples, offset: Math.max(0, Math.round(it.offset || 0)) });
   }
   if (!plan.length) throw Object.assign(new Error('No playable songs'), { code: 400 });
-  const tl = buildTimeline(plan, ['none', 'fade', 'crossfade'].includes(mode) ? mode : 'none');
+  const tl = buildTimeline(plan, ['none', 'fade', 'crossfade'].includes(mode) ? mode : 'none', xfade);
   const s = { id, tl, tracks: rows, chunks: new Map(), pending: new Map(), created: Date.now() };
   if (!store) return s;
   sessions.set(id, s);
@@ -290,6 +291,15 @@ export function createExport(options = {}) {
   const mode = options.mode || 'crossfade';
   if (!['none', 'fade', 'crossfade'].includes(mode)) throw bad('Invalid transition');
   if (options.shuffle !== undefined && typeof options.shuffle !== 'boolean') throw bad('Invalid shuffle setting');
+  if (options.sound != null && typeof options.sound !== 'object') throw bad('Invalid sound settings');
+  // The player's sound (speed, bass, reverb…) baked into the files; plain sound needs no extra pass.
+  const fx = options.sound ? cleanSound(options.sound) : null;
+  const sound = fx && !isNeutral(fx) ? fx : null;
+  const soundName = sound ? String(options.soundName || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 40) || soundLabel(sound) : null;
+  // Songs with a sound of their own keep it in a ZIP (each file is made on its own).
+  if (options.songSounds != null && typeof options.songSounds !== 'object') throw bad('Invalid sound settings');
+  const own = {};
+  if (format === 'zip') for (const [id, v] of Object.entries(options.songSounds || {}).slice(0, 5000)) own[id] = cleanSound(v);
   const selection = source(options);
   const omitted = [], tracks = [];
   for (const t of selection.rows) {
@@ -298,21 +308,23 @@ export function createExport(options = {}) {
     else omitted.push({ id: t.id, title: t.title, author: t.author, reason: t.error || (t.status === 'pending' ? 'Not downloaded yet' : 'Audio is unavailable') });
   }
   if (!tracks.length) throw bad('No downloaded songs available. Unavailable sounds cannot be exported offline.');
+  const songSounds = Object.fromEntries(tracks.filter((t) => own[t.id]).map((t) => [t.id, own[t.id]]));
   if (options.shuffle) for (let i = tracks.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [tracks[i], tracks[j]] = [tracks[j], tracks[i]]; }
   const id = digest({ format, mode: format === 'mix' ? mode : 'none', name: selection.name,
-    tracks: tracks.map((t) => [t.id,t.ver,t.title,t.author,t.fileStamp,t.coverStamp]), omitted, cover: statKey(selection.cover) });
+    tracks: tracks.map((t) => [t.id,t.ver,t.title,t.author,t.fileStamp,t.coverStamp]), omitted, cover: statKey(selection.cover), sound, songSounds });
   const existing = jobs.get(id);
   if (existing && existing.status !== 'error' && (existing.status !== 'ready' || fs.existsSync(path.join(dir, existing.file)))) return publicJob(existing);
-  const job = { id, status: 'queued', format, mode, name: selection.name, cover: selection.cover || null,
+  const tag = sound ? ` (${soundName})` : '';
+  const job = { id, status: 'queued', format, mode, name: selection.name, cover: selection.cover || null, sound, soundName, songSounds,
     tracks, omitted, done: 0, total: tracks.length, progress: 0, created: Date.now(), bytes: 0,
-    file: id + (format === 'mix' ? '.mp3' : '.zip'), filename: safeName(selection.name) + (format === 'mix' ? ' - offline.mp3' : '.zip') };
+    file: id + (format === 'mix' ? '.mp3' : '.zip'), filename: safeName(selection.name + tag) + (format === 'mix' ? ' - offline.mp3' : '.zip') };
   jobs.set(id, job); persist(job); queue.push(job); drain();
   return publicJob(job);
 }
 export function exportJob(id) { const j = jobs.get(id); return j ? publicJob(j) : null; }
 export const recentExports = () => [...jobs.values()].sort((a,b) => b.created-a.created).slice(0,20).map(publicJob);
 function publicJob(j) {
-  return { id:j.id, status:j.status, format:j.format, mode:j.mode, name:j.name, done:j.done, total:j.total, progress:j.progress,
+  return { id:j.id, status:j.status, format:j.format, mode:j.mode, name:j.name, sound:j.sound ? j.soundName || soundLabel(j.sound) : null, done:j.done, total:j.total, progress:j.progress,
     omitted:j.omitted.length, bytes:j.bytes, filename:j.filename, error:j.error || null,
     url:j.status === 'ready' ? `/api/exports/${j.id}/file` : null,
     reportUrl:j.status === 'ready' ? `/api/exports/${j.id}/report` : null };
@@ -325,17 +337,27 @@ const escapeMeta = (v) => String(v || '').replace(/([\\=;#\n\r])/g, '\\$1');
 const timestamp = (sec) => { sec=Math.floor(sec);return `${Math.floor(sec/3600)}:${String(Math.floor(sec/60)%60).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`; };
 async function makeMix(j, work, update) {
   const raw = path.join(work,'raw.mp3'), meta = path.join(work,'chapters.txt');
-  const tl = await renderMixFile(j.tracks.map((t)=>({id:t.id})), j.mode, raw, (p)=>update(p.done,p.progress*.94));
+  const tl = await renderMixFile(j.tracks.map((t)=>({id:t.id})), j.mode, raw, (p)=>update(p.done,p.progress*(j.sound ? .8 : .94)));
+  // Sound effects: one more pass over the whole mix. Speed changes every time, so the chapters follow it.
+  let audioIn = raw, pace = 1;
+  if (j.sound) {
+    const ir = path.join(work,'room.wav'), fxFile = path.join(work,'fx.mp3');
+    fs.writeFileSync(ir, impulseWav());
+    await run('ffmpeg',['-hide_banner','-loglevel','error','-y','-i',raw,'-i',ir,'-filter_complex',ffmpegGraph(j.sound,'[0:a]','[1:a]'),
+      '-map','[fx]','-c:a','libmp3lame','-b:a','192k','-ar','48000',fxFile],{maxBytes:1<<20});
+    update(j.total,.94);
+    audioIn = fxFile; pace = j.sound.speed;
+  }
   let text = `;FFMETADATA1\ntitle=${escapeMeta(j.name)}\nartist=Tokify\nalbum=${escapeMeta(j.name)}\n`;
   const lines=[];
   for (let i=0;i<tl.entries.length;i++) {
-    const e=tl.entries[i],t=j.tracks[i];const start=Math.round(e.start/48),end=Math.round((tl.entries[i+1]?.start ?? tl.audioEnd)/48);
+    const e=tl.entries[i],t=j.tracks[i];const start=Math.round(e.start/48/pace),end=Math.round((tl.entries[i+1]?.start ?? tl.audioEnd)/48/pace);
     text+=`[CHAPTER]\nTIMEBASE=1/1000\nSTART=${start}\nEND=${end}\ntitle=${escapeMeta((t.author ? t.author+' — ' : '')+t.title)}\n`;
-    lines.push(`${timestamp(e.start/48000)}  ${oneLine(t.author ? t.author+' — ' : '')}${oneLine(t.title)}`);
+    lines.push(`${timestamp(e.start/48000/pace)}  ${oneLine(t.author ? t.author+' — ' : '')}${oneLine(t.title)}`);
   }
   fs.writeFileSync(meta,text);
   const cover=j.cover || coverOf(j.tracks[0]);
-  const args=['-hide_banner','-loglevel','error','-y','-i',raw,'-f','ffmetadata','-i',meta];
+  const args=['-hide_banner','-loglevel','error','-y','-i',audioIn,'-f','ffmetadata','-i',meta];
   if(cover && fs.existsSync(cover))args.push('-i',cover);
   args.push('-map','0:a:0');if(cover && fs.existsSync(cover))args.push('-map','2:v:0','-c:v','mjpeg','-disposition:v','attached_pic');
   args.push('-map_metadata','1','-map_chapters','1','-c:a','copy','-id3v2_version','3',path.join(work,'output.mp3'));
@@ -347,20 +369,29 @@ async function makeZip(j, work, update) {
   const stage=path.join(work,'bundle'), trackDir=path.join(stage,'tracks'), cache=path.join(dir,'tracks');
   fs.mkdirSync(trackDir,{recursive:true});fs.mkdirSync(cache,{recursive:true});
   let m3u='#EXTM3U\n';
+  const ir=path.join(work,'room.wav');
+  // Each song: its own sound when it has one, else the sound for all songs (none when that is plain).
+  const fxOf=(t)=>{const s=j.songSounds?.[t.id] || j.sound;return s && !isNeutral(s) ? s : null;};
+  if(j.tracks.some(fxOf))fs.writeFileSync(ir,impulseWav());
   for(let i=0;i<j.tracks.length;i++){
-    const t=j.tracks[i],key=digest([t.id,t.ver,t.title,t.author,t.fileStamp,t.coverStamp,j.name]),file=path.join(cache,key+'.mp3');
+    const t=j.tracks[i],fx=fxOf(t),pace=fx?.speed || 1;
+    const key=digest([t.id,t.ver,t.title,t.author,t.fileStamp,t.coverStamp,j.name,...(fx ? [fx] : [])]),file=path.join(cache,key+'.mp3');
     if(!fs.existsSync(file)){
       const tmp=file+'.part.mp3',cover=coverOf(t);
       const args=['-hide_banner','-loglevel','error','-y','-i',audioPath(t.audio_file)];
-      if(cover && fs.existsSync(cover))args.push('-i',cover);
-      args.push('-map','0:a:0');if(cover && fs.existsSync(cover))args.push('-map','1:v:0','-c:v','mjpeg','-disposition:v','attached_pic');
-      args.push('-af',`atrim=start_sample=${t.trim_start}:end_sample=${t.trim_start+t.samples},asetpts=PTS-STARTPTS,volume=${t.gain || 0}dB`,
-        '-c:a','libmp3lame','-b:a','192k','-ar','48000','-id3v2_version','3','-metadata',`title=${t.title}`,'-metadata',`artist=${t.author || ''}`,'-metadata',`album=${j.name}`,tmp);
+      const hasCover=!!(cover && fs.existsSync(cover));
+      if(hasCover)args.push('-i',cover);
+      if(fx)args.push('-i',ir);
+      const trim=`atrim=start_sample=${t.trim_start}:end_sample=${t.trim_start+t.samples},asetpts=PTS-STARTPTS,volume=${t.gain || 0}dB`;
+      if(fx)args.push('-filter_complex',`[0:a]${trim}[pre];${ffmpegGraph(fx,'[pre]',`[${hasCover ? 2 : 1}:a]`)}`,'-map','[fx]');
+      else args.push('-map','0:a:0','-af',trim);
+      if(hasCover)args.push('-map','1:v:0','-c:v','mjpeg','-disposition:v','attached_pic');
+      args.push('-c:a','libmp3lame','-b:a','192k','-ar','48000','-id3v2_version','3','-metadata',`title=${t.title}`,'-metadata',`artist=${t.author || ''}`,'-metadata',`album=${j.name}`,tmp);
       try{await run('ffmpeg',args,{maxBytes:1<<20});fs.renameSync(tmp,file);}finally{fs.rmSync(tmp,{force:true});}
     }
     const filename=`${String(i+1).padStart(4,'0')} - ${safeName((t.author ? t.author+' - ' : '')+t.title)}.mp3`;
     fs.linkSync(file,path.join(trackDir,filename));
-    m3u+=`#EXTINF:${Math.round(t.samples/48000)},${oneLine(t.author ? t.author+' - ' : '')}${oneLine(t.title)}\ntracks/${filename}\n`;
+    m3u+=`#EXTINF:${Math.round(t.samples/48000/pace)},${oneLine(t.author ? t.author+' - ' : '')}${oneLine(t.title)}\ntracks/${filename}\n`;
     update(i+1,(i+1)/j.total*.95);
   }
   fs.writeFileSync(path.join(stage,'playlist.m3u8'),m3u);

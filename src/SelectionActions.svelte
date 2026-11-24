@@ -22,14 +22,14 @@
 <div class="selection-actions">
   {#if mode !== 'actions' && (!selecting || mode === 'toggle')}
     <button class="icon-btn select" class:on={selecting} onclick={() => selecting ? cancel() : (selecting = true)}
-      aria-label="Select" aria-pressed={selecting} title={selecting ? 'Cancel selection' : 'Select songs'}>
+      aria-label="Select" aria-pressed={selecting}>
       <Icon name="check" size={20} />
     </button>
   {/if}
   {#if selecting && mode !== 'toggle'}
-    <button class="btn quiet" onclick={cancel}>Cancel</button>
-    <button class="btn primary" disabled={!selected.size} onclick={addSelection} aria-haspopup="menu">
-      <Icon name="listAdd" size={16} /> Add to playlist
+    <button class="btn quiet icon" aria-label="Cancel" onclick={cancel}><Icon name="x" size={19} /></button>
+    <button class="btn primary icon" aria-label="Add to playlist" disabled={!selected.size} onclick={addSelection} aria-haspopup="menu">
+      <Icon name="listAdd" size={19} />
     </button>
   {/if}
 </div>

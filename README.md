@@ -67,6 +67,16 @@ Keys: Space pauses, arrows seek 5 s, Shift + arrows change track, Escape closes 
 
 Everything except getting new sounds works without internet: playlists, editing, playback of downloaded songs, preparing downloads. Changes are saved at once to `data/library.sqlite`.
 
+## Lyrics
+
+The lyrics panel looks up a song on Genius by its title and, when available, artist. Titles such as `Artist — Song (Official Video)` are cleaned before searching. Translations and unrelated search hits are excluded; a title shared by several artists needs an artist or audio recognition to identify the song. Sounds called “original sound” are recognised with Shazam first. Found lyrics are saved for offline reading; **Look again** repeats the lookup.
+
+For authenticated Genius search, generate a **Client Access Token** at [Genius API Clients](https://genius.com/api-clients) and save just the token in `data/genius-token.txt` (or `TOKIFY_DATA/genius-token.txt` when using another data folder), then restart Tokify. Alternatively, set `TOKIFY_GENIUS_TOKEN` or `GENIUS_ACCESS_TOKEN` in the server environment. Client ID and Client Secret are not needed. The token stays on the server; `data/` is excluded from Git.
+
+Genius supplies plain text. Its metadata search uses the official API; song pages load through [curl_cffi](https://github.com/lexiforest/curl_cffi) with its Chrome transport. `npm run setup` installs this helper alongside Shazam in the private Python environment under `data/tools/shazam/`. An existing Python with `curl_cffi` installed can be selected with `TOKIFY_GENIUS_PYTHON`.
+
+LRCLIB remains a fallback and can supply timed lyrics when the recording matches. Song pages can still return HTTP 403 or 429; Tokify then tries LRCLIB with the identified artist and pauses requests to the blocked Genius service for ten minutes. Authenticated metadata search can continue when only the song pages are blocked. Temporary service failures are not saved as “no lyrics”.
+
 ## Trim
 
 **⋯ → Trim audio** on any song: drag the white edges on the waveform or type Start / End (minimum 0.5 s), **Zoom to selection** for long recordings. **Play excerpt** previews it (optionally looping). **Save excerpt** applies it everywhere the song appears, including transitions, repeat and new downloads. The original file is kept: reopen the editor to widen the range or **Restore original**.

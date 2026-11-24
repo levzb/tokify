@@ -1,4 +1,5 @@
 <script>
+  import { providerName } from '../server/shared.js';
   import Icon from './Icon.svelte';
   import { openDownload, lib, playlistById, tracksOf, totalSec, playable, patchPlaylist, deletePlaylist, setPlaylistCover, clearPlaylistCover, ui, go, toast, ask, openMenu, pickImage } from './state.svelte.js';
   import Cover from './Cover.svelte';
@@ -20,18 +21,30 @@
   const transition = $derived(pl ? transitionOf(id) : 'crossfade');
 
   const TRANSITIONS = [
-    { id: 'none', label: 'Direct', hint: 'Next song starts the moment one ends' },
-    { id: 'fade', label: 'Fade', hint: 'Fades out, then the next fades in' },
-    { id: 'crossfade', label: 'Crossfade', hint: 'Fades out while the next fades in over it' },
+    { id: 'none', label: 'Direct', hint: 'Direct: no pause between songs', icon: 'endDirect' },
+    { id: 'fade', label: 'Fade', hint: 'Fade: out, then the next one in', icon: 'endFade' },
+    { id: 'crossfade', label: 'Crossfade', hint: 'Crossfade: songs overlap', icon: 'endCrossfade' },
   ];
+  const playing = $derived(isCtx && player.playing);
 
   function playAll() {
     if (isCtx && player.trackId) return toggle();
     playContext(id);
   }
-  async function rename() {
-    const name = await ask({ kind: 'prompt', title: 'Rename', value: pl.name, confirm: 'Save' });
+  // Rename in place: the title turns into a field. Enter or leaving it saves, Escape cancels.
+  let editing = $state(false);
+  let draft = $state('');
+  function rename() { draft = pl.name; editing = true; }
+  function focusSelect(el) { el.focus(); el.select(); }
+  async function commit() {
+    if (!editing) return;
+    editing = false;
+    const name = draft.trim().slice(0, 120);
     if (name && name !== pl.name) await patchPlaylist(id, { name });
+  }
+  function editKey(e) {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); editing = false; }
   }
   async function changeCover() {
     const f = await pickImage();
@@ -62,113 +75,144 @@
 {#if pl}
   <header class="hero">
     <button class="art" onclick={changeCover} aria-label="Change cover">
-      <Cover src={pl.cover} srcs={covers} size="100%" radius={14} />
+      <Cover src={pl.cover} srcs={covers} size="100%" radius={8} />
       <span class="art-edit"><Icon name="image" size={22} /><span>Change cover</span></span>
     </button>
     <div class="info">
-      <h1><button class="title" onclick={rename} title="Rename">{pl.name}</button></h1>
-      <p class="meta">
-        <span>{pl.kind === 'custom' ? 'Playlist' : 'Upload'}</span>
+      <h1>
+        {#if editing}
+          <input class="title title-edit" bind:value={draft} use:focusSelect onblur={commit} onkeydown={editKey}
+            aria-label="Playlist name" maxlength="120" spellcheck="false" />
+        {:else}
+          <button class="title" onclick={rename} title="Rename">{pl.name}</button>
+        {/if}
+      </h1>
+      <p class="meta-line">
+        {#if pl.origin && pl.link}<span class="kind"><a href={pl.link} target="_blank" rel="noreferrer">From {providerName(pl.origin)}</a></span>
+        {:else}<span class="kind">{pl.kind === 'custom' ? 'Playlist' : 'Upload'}</span>{/if}
         <span>{songs(tracks.length)}</span>
         {#if okCount}<span>{longDuration(totalSec(tracks))}</span>{/if}
         {#if failed}<span class="warn">{failed} unavailable</span>{/if}
       </p>
+
+      <div class="actions">
+        <button class="pp play" onclick={playAll} disabled={!okCount} aria-label={playing ? 'Pause' : 'Play all'} aria-keyshortcuts="Space">
+          <Icon name={playing ? 'pause' : 'play'} size={24} />
+        </button>
+        <button class="icon-btn shuffle" class:on={shuffle} onclick={() => setShuffle(id, !shuffle)}
+          aria-label={shuffle ? 'Shuffle is on' : 'Shuffle'} aria-pressed={shuffle}><Icon name="shuffle" size={20} /></button>
+        <div class="endings" role="radiogroup" aria-label="Transition between songs">
+          {#each TRANSITIONS as t (t.id)}
+            <button role="radio" class="ending" aria-checked={transition === t.id} class:active={transition === t.id} aria-label={t.label}
+              data-tip={t.hint} onclick={() => setTransition(id, t.id)}>
+              <Icon name={t.icon} size={22} />
+            </button>
+          {/each}
+        </div>
+        <div class="list-tools">
+          <button class="icon-btn fill" aria-label="Download playlist" onclick={()=>openDownload({contextId:id,name:pl.name})}><Icon name="download" size={18}/></button>
+          {#if tracks.length}<SelectionActions bind:selecting bind:selected exceptId={id} mode="toggle" />{/if}
+          <button class="icon-btn fill more" aria-label="Playlist menu" onclick={more}><Icon name="more" size={18} /></button>
+        </div>
+      </div>
     </div>
   </header>
 
-  <div class="actions">
-    <button class="play" onclick={playAll} disabled={!okCount} aria-label={isCtx && player.playing ? 'Pause' : 'Play'}>
-      <Icon name={isCtx && player.playing ? 'pause' : 'play'} size={24} />
-    </button>
-    <div class="seg" role="radiogroup" aria-label="Order">
-      <button role="radio" aria-checked={!shuffle} class:active={!shuffle} onclick={() => setShuffle(id, false)}>In order</button>
-      <button role="radio" aria-checked={shuffle} class:active={shuffle} onclick={() => setShuffle(id, true)}>Shuffle</button>
-    </div>
-    <div class="seg trans" role="radiogroup" aria-label="Transition between songs">
-      {#each TRANSITIONS as t}
-        <button role="radio" aria-checked={transition === t.id} class:active={transition === t.id} title={t.hint} onclick={() => setTransition(id, t.id)}>{t.label}</button>
-      {/each}
-    </div>
-    <div class="list-tools">
-      <button class="icon-btn" aria-label="Download playlist" title="Download for offline listening" onclick={()=>openDownload({contextId:id,name:pl.name})}><Icon name="download" size={20}/></button>
-      {#if tracks.length}<SelectionActions bind:selecting bind:selected exceptId={id} mode="toggle" />{/if}
-      <button class="icon-btn more" aria-label="Playlist menu" onclick={more}><Icon name="more" size={22} /></button>
-    </div>
-  </div>
-
-  {#if tracks.length}
-    {#if selecting}
-      <div class="selection-bar">
-        <span class="sub">{selected.size} selected</span>
-        <SelectionActions bind:selecting bind:selected exceptId={id} mode="actions" />
+  <section class="list-panel">
+    {#if tracks.length}
+      {#if selecting}
+        <div class="selection-bar">
+          <span class="sub">{selected.size} selected</span>
+          <SelectionActions bind:selecting bind:selected exceptId={id} mode="actions" />
+        </div>
+      {/if}
+      <TrackList {tracks} contextId={id} playlistId={id} sortable onReorder={reorder} {selecting} bind:selected />
+    {:else}
+      <div class="empty-state">
+        <p>This playlist is empty. Add songs from any list through their <strong>⋯</strong> menu, a right-click or a long press.</p>
+        <button class="btn ghost icon" aria-label="Browse all songs" onclick={() => { ui.libraryView = 'songs'; go('home'); }}><Icon name="note" size={19} /></button>
       </div>
     {/if}
-    <TrackList {tracks} contextId={id} playlistId={id} sortable onReorder={reorder} {selecting} bind:selected />
-  {:else}
-    <div class="empty">
-      <p>This playlist is empty. Add songs from any list through their <strong>⋯</strong> menu, a right-click or a long press.</p>
-      <button class="btn ghost" onclick={() => { ui.libraryView = 'songs'; go('home'); }}>Browse all songs</button>
-    </div>
-  {/if}
+  </section>
 {:else if lib.loaded}
-  <div class="empty"><p>This playlist no longer exists.</p><button class="btn ghost" onclick={() => go('home')}>Home</button></div>
+  <div class="empty-state"><p>This playlist no longer exists.</p><button class="btn ghost icon" aria-label="Home" onclick={() => go('home')}><Icon name="home" size={19} /></button></div>
 {/if}
 
 <style>
-  .hero { display: flex; align-items: flex-end; gap: 32px; padding: 12px 0 30px; }
+  .hero { display: flex; align-items: flex-end; gap: 32px; padding: 4px 0 0; }
+
   .art {
-    position: relative; width: 232px; flex: none; aspect-ratio: 1; padding: 0; border: none; background: none; cursor: pointer; border-radius: 14px;
-    box-shadow: 0 24px 60px rgba(0,0,0,.6); transition: transform .35s var(--ease);
+    position: relative; display: block; width: 208px; flex: none; align-self: flex-start; aspect-ratio: 1; padding: 0; border: none; background: none; cursor: pointer;
+    border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, .3), 0 18px 40px rgba(0, 0, 0, .45);
   }
-  .art:hover { transform: translateY(-2px); }
   .art-edit {
-    position: absolute; inset: 0; border-radius: 14px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
-    background: rgba(0,0,0,.6); color: #fff; font-size: 13px; font-weight: 600; opacity: 0; transition: opacity .2s;
+    position: absolute; inset: 0; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    background: rgba(0,0,0,.55); color: var(--text); font-size: 13px; font-weight: 500; opacity: 0; transition: opacity .15s;
   }
   .art:hover .art-edit, .art:focus-visible .art-edit { opacity: 1; }
-  .info { min-width: 0; padding-bottom: 6px; }
-  h1 { margin: 0 0 14px; }
+
+  .info { display: flex; flex-direction: column; flex: 1; min-width: 0; padding-bottom: 2px; }
+  h1 { margin: -4px 0 0; }
   .title {
-    display: block; max-width: 100%; padding: 0; border: none; background: none; cursor: text; text-align: left;
-    font: inherit; font-size: clamp(34px, 6vw, 72px); line-height: 1.02; font-weight: 800; letter-spacing: -0.04em;
-    /* dyke hero headline */
-    background: linear-gradient(180deg, #ffffff 25%, #8a8a8a 135%); -webkit-background-clip: text; background-clip: text; color: transparent;
-    overflow-wrap: anywhere; text-wrap: balance;
+    display: block; max-width: 100%; padding: 0; border: none; background: none; cursor: text; text-align: left; color: var(--text);
+    font: inherit; font-size: clamp(30px, 3.4vw, 46px); line-height: 1.1; font-weight: 800; letter-spacing: -.03em;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .meta { display: flex; flex-wrap: wrap; gap: 0; margin: 0; font-size: 14px; color: var(--muted); }
-  .meta span + span::before { content: '·'; margin: 0 8px; color: var(--muted-2); }
-  .meta span:first-child { color: #fff; font-weight: 600; }
-  .meta .warn { color: var(--muted); }
-
-  .actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 26px; }
-  .play {
-    width: 56px; height: 56px; flex: none; border-radius: 50%; border: none; cursor: pointer;
-    display: grid; place-items: center; background: #fff; color: #000; padding-left: 2px;
-    box-shadow: 0 10px 30px rgba(0,0,0,.6); transition: background .2s, transform .25s var(--ease);
+  .title-edit {
+    width: 100%; margin: 0; padding: 0; cursor: text; outline: none; border: none; border-radius: 0;
+    background: none; box-shadow: 0 2px 0 rgba(255, 255, 255, .55); caret-color: var(--accent);
   }
-  .play:hover { background: #d8d8d8; transform: scale(1.04); }
-  .play:active { transform: scale(.97); }
-  .play:disabled { background: #2a2a2a; color: #666; cursor: not-allowed; transform: none; }
-  .list-tools { display: flex; align-items: center; gap: 4px; margin-left: auto; }
-  .selection-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin: -10px 0 12px; }
+  .meta-line { margin-top: 8px; }
+  .kind { color: var(--text); font-weight: 500; }
+  .kind a { color: inherit; text-decoration: none; }
+  .kind a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .warn { color: var(--faint); }
 
-  .empty { padding: 44px 20px; text-align: center; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card-fill); }
-  .empty p { margin: 0 auto 18px; max-width: 46ch; color: var(--muted); font-size: 14px; }
-  .empty strong { color: #fff; }
+  .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 22px; }
+  .play { --s: 56px; box-shadow: 0 8px 24px rgba(0, 0, 0, .35); }
+  .play :global(svg) { translate: 1px 0; }
+  .shuffle { position: relative; width: 44px; height: 44px; color: var(--muted); }
+  .shuffle.on { color: var(--text); }
+  .shuffle.on::after {
+    content: ''; position: absolute; left: 50%; bottom: 3px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--accent);
+  }
+
+  /* ---- how songs end: three drawn envelopes ---- */
+  .endings { display: flex; align-items: center; gap: 2px; margin-left: 6px; padding-left: 14px; box-shadow: inset 1px 0 0 var(--edge); }
+  .ending {
+    display: grid; place-items: center; width: 44px; height: 40px; padding: 0; border: none; border-radius: var(--r-control);
+    background: none; color: var(--faint); cursor: pointer; transition: background .15s, color .15s;
+  }
+  .ending:hover { color: var(--muted); background: var(--fill-1); }
+  .ending.active { color: var(--text); background: var(--fill-2); }
+  .ending:focus-visible { outline: none; box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .5); }
+  .ending.active :global(svg) { animation: pop .35s var(--ease); }
+  @keyframes pop { 40% { transform: scale(1.12); } }
+  .list-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .list-tools { gap: 2px; }
+  .list-tools :global(.icon-btn) { color: var(--muted); }
+  .list-tools :global(.icon-btn:hover:not(:disabled)), .list-tools :global(.icon-btn.on) { color: var(--text); }
+
+  /* Rows sit straight on the page; only hover and the playing song light them. */
+  .list-panel { flex: 1; margin: 36px -12px 0; }
+  .selection-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; padding: 0 8px 8px; }
+
+  .empty-state { background: none; }
+  .empty-state p { margin-bottom: 4px; }
 
   @media (max-width: 760px) {
-    .hero { flex-direction: column; align-items: stretch; gap: 22px; padding: 4px 0 20px; }
-    .art { width: min(62vw, 240px); align-self: center; }
-    .title { font-size: clamp(30px, 9vw, 44px); }
-    .actions { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; }
-    .actions .play { grid-column: 3; grid-row: 1; }
-    .actions .seg:not(.trans) { grid-column: 1; grid-row: 1; }
-    .actions .list-tools { grid-column: 2; grid-row: 1; justify-self: end; margin: 0; }
-    .trans { grid-column: 1 / -1; grid-row: 2; justify-self: stretch; }
-    .trans button { flex: 1; padding-inline: 8px; }
-  }
-  @media (max-width: 380px) {
-    .actions { gap: 8px; }
-    .actions .seg:not(.trans) button { padding-inline: 8px; font-size: 12px; }
+    .hero { flex-direction: column; align-items: stretch; gap: 20px; padding: 4px 0 0; }
+    .art { width: min(56vw, 220px); align-self: center; }
+    .title { font-size: 26px; white-space: normal; overflow-wrap: anywhere; }
+    .kind { font-size: 15px; }
+    .actions { display: grid; grid-template-columns: auto auto 1fr; gap: 14px 8px; margin-top: 16px; }
+    .actions .play { grid-column: 1; grid-row: 1; --s: 52px; }
+    .actions .shuffle { grid-column: 2; grid-row: 1; }
+    .actions .list-tools { grid-column: 3; grid-row: 1; justify-self: end; margin: 0; }
+    .list-tools :global(.icon-btn) { width: 44px; height: 40px; }
+    .endings { grid-column: 1 / -1; grid-row: 2; margin: 0; padding: 0; box-shadow: none; gap: 6px; }
+    .ending { flex: 1; width: auto; height: 44px; background: var(--fill-1); }
+    .ending.active { background: var(--fill-3); }
+    .list-panel { margin: 20px -8px 0; }
   }
 </style>

@@ -1,0 +1,4 @@
+# The real aligner will need these (not installed yet):
+# demucs
+# faster-whisper
+# ctc-forced-aligner

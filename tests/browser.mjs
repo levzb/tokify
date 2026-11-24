@@ -15,6 +15,19 @@ import { DatabaseSync } from 'node:sqlite';
 import { zipSync, strToU8 } from 'fflate';
 import { tool } from '../server/system.js';
 const FFMPEG = tool('ffmpeg');
+// Title and author: with a mouse they edit in place (click the text); on a phone through the song menu.
+async function editSong(p, row, field, value) {
+  const inline = await p.evaluate(() => matchMedia('(hover: hover) and (pointer: fine)').matches);
+  if (inline) {
+    await row.locator(field === 'title' ? '.title' : '.author').click();
+    const input = p.locator('.list input.inline-edit'); await input.fill(value); await input.press('Enter');
+  } else {
+    await row.getByRole('button', { name: 'Song menu', exact: true }).click();
+    await p.getByRole('menuitem', { name: field === 'title' ? 'Rename song' : 'Edit author', exact: true }).click();
+    await p.getByRole('dialog', { name: field === 'title' ? 'Song title' : 'Author', exact: true }).locator('input').fill(value);
+    await p.getByRole('button', { name: 'Save', exact: true }).click();
+  }
+}
 
 // ---------- files: own audio/video files: checks, preview, editing, import ----------
 async function files() {
@@ -66,7 +79,7 @@ try {
       await p.waitForTimeout(500);await p.screenshot({path:`screenshots/files-config-${name}.png`});
       await p.getByRole('button',{name:'Import 2 files',exact:true}).click();
       await p.getByRole('heading',{name:'File import complete',exact:true}).waitFor({timeout:30000});
-      assert.match(await p.locator('.modal .lead').innerText(),/2 ready · 0 unavailable/);
+      assert.equal(await p.locator('.modal .lead').innerText(),'2 ready');
       await p.waitForTimeout(500);await p.screenshot({path:`screenshots/files-result-${name}.png`});
       await p.getByRole('button',{name:'Open My files',exact:true}).click();await p.locator('.list .row').first().waitFor();
       assert.equal(await p.locator('.list .row').count(),2);assert.equal(await p.locator('.list .row.failed').count(),0);
@@ -74,7 +87,7 @@ try {
       assert.equal(library.playlists[0].id,external.id);assert.equal(library.tracks.filter(t=>t.origin==='external').length,2);
       assert.equal(library.tracks.find(t=>t.title==='Ночной фрагмент').author,'Мой автор');
       // The normal playback stream works with file IDs and ignores the failed file.
-      const row=p.locator('.list .row').filter({hasText:'Ночной фрагмент'});await row.locator('.title').click();
+      const row=p.locator('.list .row').filter({hasText:'Ночной фрагмент'});await row.locator('.c-idx').click();
       await p.waitForFunction(()=>{const a=document.querySelector('audio');return a&&!a.paused&&a.currentTime>.15},null,{timeout:20000});
       await p.waitForTimeout(600);if(name==='iphone')await p.locator('.main-scroll').evaluate(el=>el.scrollTop=260);
       await p.screenshot({path:`screenshots/files-playlist-${name}.png`});
@@ -89,17 +102,11 @@ try {
       fs.writeFileSync(archive,zipSync({'user_data_tiktok.json':strToU8(JSON.stringify({'Likes and Favorites':{'Favorite Sounds':{FavoriteSoundList:[1,2,3].map(i=>({Date:`2026-01-0${i}`,Link:`https://www.tiktok.com/music/sound-760000000000000000${i}`}))}}}))}));
       await p.locator('input[type=file][multiple]').setInputFiles(archive);
       await p.getByRole('button',{name:'Upload',exact:true}).click();await p.getByText('New upload',{exact:true}).waitFor();
-      assert.match(await p.locator('.modal .lead').innerText(),/Found 3 /);await p.getByRole('button',{name:'Close',exact:true}).click();
+      assert.equal(await p.locator('.modal .lead').innerText(),'3 sounds');await p.getByRole('button',{name:'Close',exact:true}).click();
       const ownRow=p.locator('.list .row').filter({hasText:'Ночной фрагмент'});
-      await ownRow.getByRole('button',{name:'Song menu',exact:true}).click();
-      await p.getByRole('menuitem',{name:'Rename song',exact:true}).click();
-      await p.getByRole('dialog').locator('input').fill('Название после импорта');
-      await p.getByRole('button',{name:'Save',exact:true}).click();
+      await editSong(p,ownRow,'title','Название после импорта');
       await p.locator('.list .row').filter({hasText:'Название после импорта'}).waitFor();
-      await p.locator('.list .row').filter({hasText:'Название после импорта'}).getByRole('button',{name:'Song menu',exact:true}).click();
-      await p.getByRole('menuitem',{name:'Edit author',exact:true}).click();
-      await p.getByRole('dialog').locator('input').fill('Автор после импорта');
-      await p.getByRole('button',{name:'Save',exact:true}).click();
+      await editSong(p,p.locator('.list .row').filter({hasText:'Название после импорта'}),'author','Автор после импорта');
       await p.locator('.list .row').filter({hasText:'Автор после импорта'}).waitFor();
       assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);assert.deepEqual(errors,[]);
       console.log(`${name}: audio/video upload, editable metadata, early rejection of photos and silent videos, inline metadata, playback, deduplication, pinned My files, persistence and TikTok archive passed`);
@@ -138,6 +145,7 @@ try {
      const p=await ctx.newPage(),errors=[];p.on('pageerror',e=>errors.push(e.message));await p.goto(base);await p.getByRole('heading',{name:'Uploads',exact:true}).waitFor();
      const input=p.getByRole('textbox',{name:'Music link',exact:true});
      assert.ok((await input.boundingBox()).y<(await p.locator('.top').boundingBox()).y);
+     await input.click();await p.locator('.top').waitFor({state:'detached'});await p.keyboard.press('Escape');await p.locator('.top').waitFor();await p.locator('.room-body').waitFor({state:'detached'});
      assert.equal(await p.getByRole('button',{name:'Import',exact:true}).count(),0);
      await input.fill('https://example.com/video/123');await p.getByRole('button',{name:'Find sound',exact:true}).click();await p.getByRole('alert').filter({hasText:'tiktok.com'}).waitFor();
      await input.fill(`https://www.tiktok.com/music/sound-${ids[index]}`);await input.press('Enter');await p.getByRole('button',{name:'Import',exact:true}).waitFor();
@@ -146,17 +154,13 @@ try {
      const library=await(await ctx.request.get(base+'/api/library')).json(),ext=library.playlists.find(p=>p.kind==='external');assert.ok(ext.trackIds.includes(ids[index]));assert.equal(library.playlists[0].id,ext.id);assert.equal(library.playlists.length,2);
      await p.screenshot({path:`screenshots/link-saved-${name}.png`});await p.locator('.link-import').getByRole('button',{name:'Open',exact:true}).click();await p.locator('.hero .title').filter({hasText:'Мои файлы'}).waitFor();
      let row=p.locator('.list .row').filter({hasText:['Afterglow','Night drive'][index]});
-     await row.locator('.title').click();await p.waitForFunction(()=>{const a=document.querySelector('audio');return a&&!a.paused&&a.currentTime>.1});
-     await row.getByRole('button',{name:'Song menu',exact:true}).click();
-     await p.getByRole('menuitem',{name:'Rename song',exact:true}).click();
-     await p.getByRole('dialog',{name:'Song title',exact:true}).locator('input').fill(`My sound · ${name}`);
-     await p.getByRole('button',{name:'Save',exact:true}).click();
+     await row.locator('.c-idx').click();await p.waitForFunction(()=>{const a=document.querySelector('audio');return a&&!a.paused&&a.currentTime>.1});
+     await editSong(p,row,'title',`My sound · ${name}`);
      row=p.locator('.list .row').filter({hasText:`My sound · ${name}`});await row.waitFor();
-     await row.getByRole('button',{name:'Song menu',exact:true}).click();await p.getByRole('menuitem',{name:'Edit author',exact:true}).click();
-     await p.getByRole('dialog',{name:'Author',exact:true}).locator('input').fill('My artist');await p.getByRole('button',{name:'Save',exact:true}).click();await row.getByText('My artist',{exact:true}).waitFor();
+     await editSong(p,row,'author','My artist');await row.getByText('My artist',{exact:true}).waitFor();
      assert.equal(await p.locator('audio').evaluate(a=>a.paused),false,'editing must keep playback running');
      assert.ok((await p.locator('.bar .np-title').allTextContents()).every(t=>t===`My sound · ${name}`));
-     await row.getByRole('button',{name:'Song menu',exact:true}).click();await p.getByRole('menuitem',{name:'Edit author',exact:true}).waitFor();
+     await row.getByRole('button',{name:'Song menu',exact:true}).click();await p.getByRole('menuitem',{name:'Add to playlist',exact:true}).waitFor();
      await p.waitForTimeout(400);await p.screenshot({path:`screenshots/song-menu-${name}.png`});await p.keyboard.press('Escape');
      await p.reload();await p.locator('.list .row').filter({hasText:`My sound · ${name}`}).getByText('My artist',{exact:true}).waitFor();
      await p.getByRole('button',{name:'Home',exact:true}).click();await input.fill(`https://www.tiktok.com/music/sound-${ids[index]}`);await p.getByRole('button',{name:'Find sound',exact:true}).click();await p.locator('.link-import').getByRole('button',{name:'Open',exact:true}).waitFor();assert.equal(await p.getByRole('button',{name:'Import',exact:true}).count(),0);
@@ -203,9 +207,11 @@ try{
  }
  await input.fill('https://soundcloud.com/artist/preview');await p.getByRole('button',{name:'Find sound',exact:true}).click();await p.getByRole('alert').filter({hasText:'Only a preview'}).waitFor();assert.equal(await section.getByRole('button',{name:'Import',exact:true}).count(),0);
  await input.fill('https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl');await p.getByRole('button',{name:'Find sound',exact:true}).click();await section.getByRole('button',{name:'Find on YouTube',exact:true}).waitFor();assert.equal(await section.getByRole('button',{name:'Import',exact:true}).count(),0);assert.match(await section.innerText(),/not a full audio download/);
- const before=(await(await ctx.request.get(base+'/api/library')).json()).tracks.length;await section.getByRole('button',{name:'Find on YouTube',exact:true}).click();await section.getByRole('button',{name:'Choose',exact:true}).waitFor();assert.equal((await(await ctx.request.get(base+'/api/library')).json()).tracks.length,before,'Spotify search must not add or download audio');await p.waitForTimeout(350);await p.screenshot({path:`screenshots/media-spotify-${name}.png`});
- await section.getByRole('button',{name:'Choose',exact:true}).click();await section.getByRole('link',{name:'YouTube',exact:true}).waitFor();if(await section.getByRole('button',{name:'Import',exact:true}).count()){await section.getByRole('button',{name:'Import',exact:true}).click();await section.getByRole('button',{name:'Open',exact:true}).waitFor({timeout:30000});}
+ const before=(await(await ctx.request.get(base+'/api/library')).json()).tracks.length;await section.getByRole('button',{name:'Find on YouTube',exact:true}).click();await section.getByRole('button',{name:'Choose Selected YouTube recording',exact:true}).waitFor();assert.equal((await(await ctx.request.get(base+'/api/library')).json()).tracks.length,before,'Spotify search must not add or download audio');await p.waitForTimeout(350);await p.screenshot({path:`screenshots/media-spotify-${name}.png`});
+ await section.getByRole('button',{name:'Choose Selected YouTube recording',exact:true}).click();await section.getByRole('link',{name:'YouTube',exact:true}).waitFor();if(await section.getByRole('button',{name:'Import',exact:true}).count()){await section.getByRole('button',{name:'Import',exact:true}).click();await section.getByRole('button',{name:'Open',exact:true}).waitFor({timeout:30000});}
  const lib=await(await ctx.request.get(base+'/api/library')).json();assert.equal(lib.playlists.filter(p=>p.kind==='external').length,1);assert.equal(lib.playlists[0].kind,'external');assert.equal(lib.tracks.length,3);assert.ok(lib.tracks.every(t=>['youtube','soundcloud'].includes(t.origin)));
+ // Words instead of a link search YouTube; a hit opens the same card (here: already saved, so Open).
+ await p.getByRole('button',{name:'Home',exact:true}).click();await input.fill('the artist recording');await p.getByRole('button',{name:'Find sound',exact:true}).click();await section.getByRole('listitem').filter({hasText:'Selected YouTube recording'}).waitFor();await section.getByRole('button',{name:'Choose Selected YouTube recording',exact:true}).click();await section.getByRole('button',{name:'Open',exact:true}).waitFor();assert.equal((await(await ctx.request.get(base+'/api/library')).json()).tracks.length,3,'search must not add songs by itself');
  // New source IDs must work in every ordinary playlist and in the renderer.
  const created=await ctx.request.post(base+'/api/playlists',{data:{name:'Multisource',trackIds:lib.tracks.map(t=>t.id)}});assert.equal(created.status(),200);const{id}=await created.json();const changed=await ctx.request.patch(base+'/api/playlists/'+id,{data:{trackIds:lib.tracks.map(t=>t.id).reverse()}});assert.equal(changed.status(),200);
  const sid=crypto.randomUUID(),session=await ctx.request.post(base+'/api/sessions',{data:{id:sid,mode:'crossfade',items:lib.tracks.map(t=>({id:t.id}))}});assert.equal(session.status(),200);const stream=await ctx.request.get(base+'/stream/'+sid+'.mp3');assert.equal(stream.status(),200);assert.ok((await stream.body()).length>10000);
@@ -231,20 +237,20 @@ try{
  const browser=await engine.launch(),ctx=await browser.newContext(options);try{
  const p=await ctx.newPage(),errors=[];p.on('pageerror',e=>errors.push(e.message));await p.goto(base+'/#/p/source');await p.locator('.hero .title').waitFor();
  const row=()=>p.locator('.list .row').filter({hasText:names[index]});
- await row().locator('.title').click();await p.waitForFunction(()=>{const a=document.querySelector('audio:not(.clip-audio)');return a&&!a.paused&&a.currentTime>.1});
+ await row().locator('.c-idx').click();await p.waitForFunction(()=>{const a=document.querySelector('audio:not(.clip-audio)');return a&&!a.paused&&a.currentTime>.1});
  async function open(){await row().hover();await row().getByRole('button',{name:'Song menu',exact:true}).click();await p.getByRole('menuitem',{name:'Trim audio',exact:true}).click();await p.getByRole('button',{name:'Play excerpt',exact:true}).waitFor({timeout:20000});}
  await open();const editor=p.getByRole('dialog',{name:'Trim audio',exact:true});assert.equal(await p.locator('audio:not(.clip-audio)').evaluate(a=>a.paused),true);
  await p.getByRole('slider',{name:'Excerpt start',exact:true}).press('ArrowRight');assert.equal(await p.getByRole('spinbutton',{name:'Excerpt start seconds',exact:true}).inputValue(),'0.1');
- if(name==='desktop'){const w=await p.getByRole('group',{name:'Excerpt waveform',exact:true}).boundingBox(),h=await p.getByRole('slider',{name:'Excerpt end',exact:true}).boundingBox();await p.mouse.move(h.x+h.width/2,h.y+h.height/2);await p.mouse.down();await p.mouse.move(w.x+w.width*.75,w.y+w.height/2,{steps:10});await p.mouse.up();assert.ok(Math.abs(Number(await p.getByRole('spinbutton',{name:'Excerpt end seconds',exact:true}).inputValue())-6)<.05);}
+ if(name==='desktop'){await editor.evaluate(el=>Promise.all(el.getAnimations({subtree:true}).filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished)));const w=await p.getByRole('group',{name:'Excerpt waveform',exact:true}).boundingBox(),h=await p.getByRole('slider',{name:'Excerpt end',exact:true}).boundingBox();await p.mouse.move(h.x+h.width/2,h.y+h.height/2);await p.mouse.down();await p.mouse.move(w.x+w.width*.75,w.y+w.height/2,{steps:10});await p.mouse.up();assert.ok(Math.abs(Number(await p.getByRole('spinbutton',{name:'Excerpt end seconds',exact:true}).inputValue())-6)<.05);}
  await p.getByRole('spinbutton',{name:'Excerpt start seconds',exact:true}).fill('1');await p.getByRole('spinbutton',{name:'Excerpt end seconds',exact:true}).fill('0.1');assert.equal(await p.getByRole('button',{name:'Save excerpt',exact:true}).isDisabled(),true);
- await p.getByRole('spinbutton',{name:'Excerpt end seconds',exact:true}).fill('3');await p.getByRole('button',{name:'Zoom to selection',exact:true}).click();await p.getByRole('button',{name:'Fit',exact:true}).click();
+ await p.getByRole('spinbutton',{name:'Excerpt end seconds',exact:true}).fill('3');
  await p.getByRole('spinbutton',{name:'Excerpt start seconds',exact:true}).fill('1');await p.getByRole('spinbutton',{name:'Excerpt end seconds',exact:true}).fill('3');await p.getByRole('button',{name:'Play excerpt',exact:true}).click();await p.waitForFunction(()=>{const a=document.querySelector('.clip-audio');return a&&!a.paused&&a.currentTime>1.1;});await p.waitForTimeout(2400);const at=await p.locator('.clip-audio').evaluate(a=>a.currentTime);assert.ok(at>=1&&at<=3.2,'preview must loop inside the selection');
  await p.getByRole('button',{name:'Pause preview',exact:true}).click();assert.equal(await p.locator('audio:not(.clip-audio)').evaluate(a=>a.paused),true);
  await editor.evaluate(el=>el.scrollTop=0);await p.waitForTimeout(400);await p.screenshot({path:`screenshots/clip-editor-${name}.png`});
- await p.getByRole('button',{name:'Cancel',exact:true}).click();assert.equal((await(await ctx.request.get(base+'/api/tracks/'+ids[index]+'/clip')).json()).edited,false);
+ await p.getByRole('button',{name:'Close editor',exact:true}).click();assert.equal((await(await ctx.request.get(base+'/api/tracks/'+ids[index]+'/clip')).json()).edited,false);
  await open();await p.getByRole('spinbutton',{name:'Excerpt start seconds',exact:true}).fill('1');await p.getByRole('spinbutton',{name:'Excerpt end seconds',exact:true}).fill('3');await p.getByRole('button',{name:'Save excerpt',exact:true}).click();await editor.waitFor({state:'hidden'});
  let lib=await(await ctx.request.get(base+'/api/library')).json();assert.equal(lib.tracks.find(t=>t.id===ids[index]).samples,96000);
- await row().locator('.title').click();await p.waitForFunction(()=>{const a=document.querySelector('audio:not(.clip-audio)');return a&&!a.paused&&a.currentTime>.1&&document.querySelector('.bar .progress .time:last-child')?.textContent.trim()==='0:02'});
+ await row().locator('.c-idx').click();await p.waitForFunction(()=>{const a=document.querySelector('audio:not(.clip-audio)');return a&&!a.paused&&a.currentTime>.1&&document.querySelector('.bar .progress .time:last-child')?.textContent.trim()==='0:02'});
  await open();assert.equal(await p.getByRole('spinbutton',{name:'Excerpt start seconds',exact:true}).inputValue(),'1');assert.equal(await p.getByRole('spinbutton',{name:'Excerpt end seconds',exact:true}).inputValue(),'3');
  // Moving the window beyond the old excerpt must still use the eight-second original.
  await p.getByRole('spinbutton',{name:'Excerpt end seconds',exact:true}).fill('6');await p.getByRole('spinbutton',{name:'Excerpt start seconds',exact:true}).fill('4');await p.getByRole('button',{name:'Save excerpt',exact:true}).click();await editor.waitFor({state:'hidden'});await p.reload();await p.locator('.hero .title').waitFor();await open();assert.equal(await p.getByRole('spinbutton',{name:'Excerpt start seconds',exact:true}).inputValue(),'4');
@@ -318,21 +324,24 @@ try{
    await ctx.route('**/*',route=>{const host=new URL(route.request().url()).hostname;if(['127.0.0.1','localhost'].includes(host))return route.continue();outside++;return route.abort();});
    const p=await ctx.newPage(),errors=[];p.on('pageerror',e=>errors.push(e.message));await p.goto(base);await p.getByRole('heading',{name:'Uploads',exact:true}).waitFor();assert.equal(await p.evaluate(()=>navigator.onLine),false);
    const flight=`Flight mix · ${name}`,ambient=`Ambient · ${name}`;
-   async function create(name){await p.getByRole('button',{name:/^New playlist/}).click();await p.locator('.hero .title').waitFor();const id=decodeURIComponent(p.url().split('/p/')[1]);await p.locator('.hero .title').click();await p.getByRole('dialog',{name:'Rename',exact:true}).locator('input').fill(name);await p.getByRole('button',{name:'Save',exact:true}).click();await p.locator('.hero .title').filter({hasText:name}).waitFor();return id;}
+   async function create(name){await p.getByRole('button',{name:/^New playlist/}).click();await p.locator('.hero .title').waitFor();const id=decodeURIComponent(p.url().split('/p/')[1]);await p.locator('.hero .title').click();await p.getByRole('textbox',{name:'Playlist name',exact:true}).fill(name);await p.keyboard.press('Enter');await p.locator('.hero .title').filter({hasText:name}).waitFor();return id;}
    const flightId=await create(flight);await p.getByRole('button',{name:'Home',exact:true}).click();
+   const playlistCount=async()=>(await(await ctx.request.get(base+'/api/library')).json()).playlists.length;const before0=await playlistCount();
+   await p.getByRole('button',{name:/^New playlist/}).click();await p.locator('.hero .title').waitFor();assert.equal(await playlistCount(),before0+1);await p.getByRole('button',{name:'Home',exact:true}).click();
+   for(let i=0;i<40&&await playlistCount()!==before0;i++)await p.waitForTimeout(100);assert.equal(await playlistCount(),before0,'an untouched new playlist is removed on leaving it');
    async function add(names,playlist){await p.getByRole('tab',{name:'All songs',exact:true}).click();await p.getByRole('button',{name:'Select',exact:true}).click();for(const name of names)await p.locator('.list .row').filter({hasText:name}).locator('.title').click();await p.getByRole('button',{name:'Add to playlist',exact:true}).click();await p.getByRole('menuitem',{name:playlist,exact:true}).click();await p.getByRole('button',{name:'Select',exact:true}).waitFor();}
    await add(['Afterglow','Night drive'],flight);await p.locator('.rail').getByRole('button',{name:flight,exact:true}).click();await p.locator('.hero .title').filter({hasText:flight}).waitFor();await p.waitForFunction(()=>document.querySelectorAll('.list .row').length===2);
    const before=await p.locator('.list .row .title').allTextContents(),a=await p.locator('.list .row').first().boundingBox(),b=await p.locator('.list .row').nth(1).boundingBox();
    const reordered=p.waitForResponse(r=>r.url().endsWith('/api/playlists/'+flightId)&&r.request().method()==='PATCH');
    await p.mouse.move(a.x+a.width*.4,a.y+a.height*.5);await p.mouse.down();await p.mouse.move(b.x+b.width*.4,b.y+b.height*.7,{steps:12});await p.mouse.up();await reordered;assert.deepEqual(await p.locator('.list .row .title').allTextContents(),before.toReversed());
    const first=p.locator('.list .row').first();const removed=await first.locator('.title').innerText();await first.hover();await first.getByRole('button',{name:'Song menu',exact:true}).click();await p.getByRole('menuitem',{name:'Remove from playlist',exact:true}).click();await p.waitForFunction(()=>document.querySelectorAll('.list .row').length===1);
-   let row=p.locator('.list .row').first();const keptTitle=await row.locator('.title').innerText();await row.hover();await row.getByRole('button',{name:'Song menu',exact:true}).click();await p.getByRole('menuitem',{name:'Rename song',exact:true}).click();const edited=`My flight sound · ${name}`;await p.getByRole('dialog',{name:'Song title',exact:true}).locator('input').fill(edited);await p.getByRole('button',{name:'Save',exact:true}).click();await p.locator('.list .row').filter({hasText:edited}).waitFor();
+   let row=p.locator('.list .row').first();const keptTitle=await row.locator('.title').innerText();await row.hover();const edited=`My flight sound · ${name}`;await editSong(p,row,'title',edited);await p.locator('.list .row').filter({hasText:edited}).waitFor();
    await p.getByRole('button',{name:'Home',exact:true}).click();const ambientId=await create(ambient);await p.getByRole('button',{name:'Home',exact:true}).click();await add([removed,'Slow motion'],ambient);await p.locator('.rail').getByRole('button',{name:ambient,exact:true}).click();await p.locator('.hero .title').filter({hasText:ambient}).waitFor();await p.waitForFunction(()=>document.querySelectorAll('.list .row').length===2);
    await p.waitForTimeout(500);await p.screenshot({path:`screenshots/offline-organize-${name}.png`});
    const snapshot=await(await ctx.request.get(base+'/api/library')).json();const wanted=snapshot.playlists.filter(pl=>[flightId,ambientId].includes(pl.id));assert.equal(wanted.find(pl=>pl.id===flightId).trackIds.length,1);assert.equal(wanted.find(pl=>pl.id===ambientId).trackIds.length,2);assert.equal(snapshot.tracks.length,3);
    await p.reload();await p.locator('.hero .title').filter({hasText:ambient}).waitFor();await stop();boot();await p.reload();await p.locator('.hero .title').filter({hasText:ambient}).waitFor();
    const restored=await(await ctx.request.get(base+'/api/library')).json();assert.deepEqual(restored.playlists.filter(pl=>[flightId,ambientId].includes(pl.id)),wanted);assert.ok(restored.tracks.some(t=>t.title===edited));
-   await p.locator('.rail').getByRole('button',{name:flight,exact:true}).click();await p.locator('.list .row .title').filter({hasText:edited}).click();await p.waitForFunction(()=>{const a=document.querySelector('audio');return a&&!a.paused&&a.currentTime>.2});
+   await p.locator('.rail').getByRole('button',{name:flight,exact:true}).click();await p.locator('.list .row').filter({hasText:edited}).locator('.c-idx').click();await p.waitForFunction(()=>{const a=document.querySelector('audio');return a&&!a.paused&&a.currentTime>.2});
    assert.equal(outside,0);assert.deepEqual(errors,[]);console.log(`${name}: local offline launcher, create/rename playlists, multi-select filing, drag reorder, remove, metadata edit, reload, server restart and audio passed with internet blocked`);
    // Restore the shared test track name before the second browser's run.
    const changed=restored.tracks.find(t=>t.title===edited);await ctx.request.patch(base+'/api/tracks/'+changed.id,{data:{title:keptTitle}});
@@ -364,7 +373,7 @@ try {
   await page.waitForTimeout(1100); await page.screenshot({ path: 'screenshots/01-import-desktop.png' });
   await page.locator('.import').filter({ hasText: original.name }).click();
   await page.waitForTimeout(600); await page.screenshot({ path: 'screenshots/06-processing-desktop.png' });
-  await page.getByRole('button', { name: /Hide.*keep downloading/ }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
   await page.locator('input[type=file][multiple]').first().setInputFiles('TikTok_Data_1793457765.zip');
   await page.getByRole('button', { name: 'Upload', exact: true }).click();
   await page.getByText('New upload', { exact: true }).waitFor();
@@ -393,7 +402,7 @@ try {
   await page.getByRole('radio', { name: 'Fade', exact: true }).click(); await page.waitForTimeout(700);
   await page.getByRole('radio', { name: 'Crossfade', exact: true }).click(); await page.waitForTimeout(700);
   // Restart at the first clip; stop JavaScript across a track boundary.
-  await page.locator('.row').first().locator('.title').click();
+  await page.locator('.row').first().locator('.c-idx').click();
   await page.waitForFunction(() => {const a=document.querySelector('audio');return !a.paused && a.currentTime>.3;});
   const firstDuration = tracks[0].samples / 48000;
   const startAt = Math.max(0, firstDuration - Math.min(1.5, firstDuration/3) - 2);

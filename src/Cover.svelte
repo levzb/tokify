@@ -20,12 +20,11 @@
 <style>
   .cover {
     width: var(--s); height: var(--s); flex: none; border-radius: var(--r); overflow: hidden;
-    background: #111; position: relative;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+    background: rgba(255,255,255,.06); position: relative;
   }
   .cover img { width: 100%; height: 100%; object-fit: cover; user-select: none; -webkit-user-drag: none; }
   .mosaic { display: grid; grid-template-columns: 1fr 1fr; width: 100%; height: 100%; }
   .empty :global(svg) { width: 36%; height: 36%; }
-  .empty { width: 100%; height: 100%; display: grid; place-items: center; color: var(--muted-2); background: linear-gradient(160deg, #1a1a1a, #0b0b0b); }
+  .empty { width: 100%; height: 100%; display: grid; place-items: center; color: var(--faint); background: linear-gradient(160deg, rgba(255,255,255,.1), rgba(255,255,255,.03)); }
   .dim img { filter: grayscale(1); opacity: .45; }
 </style>

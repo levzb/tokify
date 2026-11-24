@@ -33,8 +33,9 @@ export function tool(name) {
   const override = process.env['TOKIFY_' + name.replace('-', '').toUpperCase()];
   if (override) return override;
   if (name === 'yt-dlp') {
-    // Standalone binary from setup; older installs used a Python virtualenv in the same folder.
-    const found = [WIN ? 'yt-dlp.exe' : 'yt-dlp', WIN ? 'Scripts/yt-dlp.exe' : 'bin/yt-dlp']
+    // A Python virtualenv in this folder wins when there is one: it starts in a fraction of a second, while the
+    // one-file build unpacks itself on every run (seconds per search). Setup keeps both up to date.
+    const found = [WIN ? 'Scripts/yt-dlp.exe' : 'bin/yt-dlp', WIN ? 'yt-dlp.exe' : 'yt-dlp']
       .map((f) => path.join(ytdlpDir(), f)).find((f) => fs.existsSync(f));
     return found || name;
   }
@@ -68,6 +69,21 @@ async function installYtDlp() {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(file + '.part', Buffer.from(await r.arrayBuffer()), { mode: 0o755 });
   fs.renameSync(file + '.part', file);
+  // An existing virtualenv (faster to start) is upgraded too, so the two never drift apart.
+  const pip = path.join(dir, WIN ? 'Scripts/python.exe' : 'bin/python');
+  if (fs.existsSync(pip)) spawnSync(pip, ['-m', 'pip', 'install', '-q', '-U', 'yt-dlp'], { stdio: 'ignore', windowsHide: true, timeout: 180_000 });
+}
+
+// Lyrics helpers share one private Python virtualenv: Shazam recognition and Genius's Chrome transport.
+function installShazam() {
+  const py = [WIN ? 'py' : 'python3', 'python'].find((p) => works(p, ['--version']));
+  if (!py) throw new Error('Python 3.10+ is needed (https://www.python.org/downloads/)');
+  const dir = path.join(dataDir(), 'tools', 'shazam'), bin = path.join(dir, WIN ? 'Scripts/python.exe' : 'bin/python');
+  if (!fs.existsSync(bin) && spawnSync(py, ['-m', 'venv', dir], { stdio: 'ignore', windowsHide: true }).status !== 0)
+    throw new Error('could not create a Python virtualenv');
+  if (spawnSync(bin, ['-m', 'pip', 'install', '-q', '-U', 'shazamio', 'curl_cffi==0.17.0'], { stdio: 'ignore', windowsHide: true, timeout: 300_000 }).status !== 0)
+    throw new Error('pip could not install shazamio and curl_cffi');
+  return bin;
 }
 
 async function setup() {
@@ -89,6 +105,10 @@ async function setup() {
   say('yt-dlp (YouTube and SoundCloud)');
   try { await installYtDlp(); console.log(`  ${tool('yt-dlp')}`); }
   catch (e) { warnings.push(`yt-dlp: ${e.message}. YouTube and SoundCloud links will not work until setup succeeds.`); }
+
+  say('Lyrics (Shazam recognition and Genius page loading)');
+  try { console.log(`  ${installShazam()}`); }
+  catch (e) { warnings.push(`Lyrics helpers: ${e.message}. Song recognition and Genius page loading may be unavailable. Retry with: npm run setup`); }
 
   say('Building the app');
   if (!node([VITE, 'build', '--logLevel', 'warn'])) fail('The build failed (see above).');

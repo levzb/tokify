@@ -1,6 +1,7 @@
 <script>
   import Icon from './Icon.svelte';
   import Cover from './Cover.svelte';
+  import Modal from './Modal.svelte';
   import { ui, go, lib, load } from './state.svelte.js';
   import { api, clock } from './util.js';
   import { discardPreviews } from './files.js';
@@ -79,19 +80,15 @@
     : row.status === 'failed' ? row.error : 'Waiting';
 </script>
 
-<svelte:window onkeydown={(e) => ui.fileImportOpen && e.key === 'Escape' && close()} />
-
 {#if ui.fileImportOpen}
-  <div class="overlay" onclick={(e) => e.target === e.currentTarget && close()} role="presentation">
-    <div class="modal" role="dialog" tabindex="-1" aria-modal="true" aria-label="Import files">
-      <button class="modal-close icon-btn" onclick={close} aria-label="Close"><Icon name="x" size={18} /></button>
-      <h3>{finished ? 'File import complete' : started ? 'Importing files' : 'Import files'}</h3>
-      <p class="lead">{started ? `${done} of ${rows.length} processed${finished ? ` · ${ready} ready · ${failed} unavailable` : ''}` : 'Audio checked. Click the title or author to edit.'}</p>
-      {#if started}<div class="progress" role="progressbar" aria-label="File import progress" aria-valuenow={done} aria-valuemax={rows.length}><div style="transform:scaleX({percent / 100})"></div></div>{/if}
-      <div class="files">
+  <Modal label="Import files" title={finished ? 'File import complete' : started ? 'Importing files' : 'Import files'}
+    lead={!started ? '' : finished ? `${ready} ready${failed ? ` · ${failed} failed` : ''}` : `${done} of ${rows.length}`}
+    art={rows.find((r) => r.cover)?.cover || ''} size="xl" onclose={close}>
+      {#if started}<div class="meter" role="progressbar" aria-label="File import progress" aria-valuenow={done} aria-valuemax={rows.length}><i style="transform:scaleX({percent / 100})"></i></div>{/if}
+      <div class="files scroll">
         {#each rows as row (row.key)}
           <article class="file" class:failed={row.status === 'failed'}>
-            <div class="art"><Cover src={row.cover} size="100%" radius={12} /></div>
+            <div class="art"><Cover src={row.cover} size="100%" radius={8} /></div>
             <div class="info">
               {#if !started}
                 <div class="track-title editable" contenteditable="plaintext-only" role="textbox" tabindex="0" aria-multiline="false"
@@ -106,70 +103,50 @@
                 <h4 class="track-title">{row.title}</h4>
                 <div class="author">{row.author || 'Unknown artist'}</div>
               {/if}
-              <div class="file-meta"><span class="filename" title={row.filename}>{row.filename}</span>{#if row.duration}<span class="duration mono">{clock(row.duration)}</span>{/if}</div>
-              {#if started}<p class="status" role="status">{#if row.status === 'processing'}<span class="spinner"></span>{:else if row.status === 'ok'}<Icon name="check" size={14} />{:else if row.status === 'failed'}<Icon name="alert" size={14} />{/if}{statusText(row)}</p>{/if}
+              <div class="file-meta"><span class="filename" title={row.filename}>{row.filename}</span>{#if row.duration}<span class="duration dur">{clock(row.duration)}</span>{/if}</div>
+              {#if started}<p class="status" role="status">{#if row.status === 'processing'}<span class="spinner sm"></span>{:else if row.status === 'ok'}<Icon name="check" size={14} />{:else if row.status === 'failed'}<Icon name="alert" size={14} />{/if}{statusText(row)}</p>{/if}
             </div>
-            {#if !started}<button class="icon-btn remove" aria-label="Remove {row.filename}" title="Remove file" onclick={() => remove(row)}><Icon name="x" size={16} /></button>{/if}
+            {#if !started}<button class="icon-btn sm remove" aria-label="Remove {row.filename}" onclick={() => remove(row)}><Icon name="x" size={16} /></button>{/if}
           </article>
         {/each}
       </div>
-      <div class="footer">
+      <div class="modal-foot">
         {#if !started}
-          <button class="btn primary btn-block" disabled={!canStart} onclick={() => run()}>Import {rows.length} {rows.length === 1 ? 'file' : 'files'}</button>
-          <p class="note">Added to “Мои файлы” and All songs.</p>
-        {:else if !finished}
-          <button class="btn ghost btn-block" onclick={close}>Hide — keep processing</button>
-        {:else}
-          {#if playlistId}<button class="btn primary btn-block" onclick={openFiles}>Open My files</button>{/if}
-          {#if failed}<button class="btn ghost btn-block" onclick={() => run(true)}>Try failed files again</button>{/if}
-          <p class="note">{failed ? 'Couldn’t process some files. Their errors are shown above.' : 'Your files are also in All songs. Add them to any playlist.'}</p>
+          <button class="btn primary icon" aria-label="Import {rows.length} {rows.length === 1 ? 'file' : 'files'}" disabled={!canStart} onclick={() => run()}><Icon name="upload" size={19} /><span class="n">{rows.length}</span></button>
+        {:else if finished}
+          {#if failed}<button class="btn ghost icon" aria-label="Retry failed" onclick={() => run(true)}><Icon name="retry" size={19} /></button>{/if}
+          {#if playlistId}<button class="btn primary icon" aria-label="Open My files" onclick={openFiles}><Icon name="arrow" size={20} /></button>{/if}
         {/if}
       </div>
-    </div>
-  </div>
+  </Modal>
 {/if}
 
 <style>
-  .overlay { position: fixed; inset: 0; z-index: 310; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,.78); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
-  .modal { position: relative; width: 100%; max-width: 740px; max-height: 88dvh; overflow-y: auto; padding: 32px; border: 1px solid var(--border-strong); border-radius: 20px; background: var(--panel); box-shadow: var(--shadow-pop); animation: fadeUp .3s var(--ease) both; }
-  .modal-close { position: absolute; right: 16px; top: 16px; }
-  h3 { margin: 0 36px 6px 0; font-size: 26px; font-weight: 700; letter-spacing: -.035em; }
-  .lead { margin: 0 0 28px; color: var(--muted); font-size: 14px; }
-  .files { display: grid; max-height: 52dvh; overflow-y: auto; }
-  .file { position: relative; display: grid; grid-template-columns: 144px minmax(0,1fr); gap: 24px; align-items: center; padding: 24px 0; border-bottom: 1px solid var(--border); }
+  .files { display: grid; max-height: 52dvh; margin: 0 -8px; padding: 0 8px; }
+  .file { position: relative; display: grid; grid-template-columns: 88px minmax(0,1fr); gap: 16px; align-items: center; padding: 12px 0; }
   .file:first-child { padding-top: 0; }
-  .file:last-child { border-bottom: none; padding-bottom: 0; }
-  .art { width: 100%; aspect-ratio: 1; border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.45); }
-  .info { min-width: 0; padding-right: 28px; }
-  .track-title { margin: 0; font-size: clamp(24px,3vw,34px); line-height: 1.14; font-weight: 800; letter-spacing: -.035em; overflow-wrap: anywhere; }
-  .author { margin-top: 10px; font-size: 17px; line-height: 1.4; color: var(--muted); min-height: 1.4em; overflow-wrap: anywhere; }
-  .editable { cursor: text; border: none; outline: none; background: none; border-radius: 0; transition: color .2s; }
-  .editable:hover, .editable:focus { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 5px; }
+  .file:last-child { padding-bottom: 0; }
+  .art { width: 100%; aspect-ratio: 1; border-radius: var(--r-control); box-shadow: var(--shadow-art); }
+  .info { min-width: 0; padding-right: 32px; }
+  .track-title { margin: 0; font-size: 15px; line-height: 1.3; font-weight: 600; letter-spacing: -.01em; overflow-wrap: anywhere; }
+  .author { margin-top: 2px; font-size: 13px; line-height: 1.4; color: var(--muted); min-height: 1.4em; overflow-wrap: anywhere; }
+  .editable { cursor: text; border: none; outline: none; background: none; border-radius: 4px; transition: color .2s, background .2s; }
+  .editable:hover, .editable:focus { text-decoration: underline; text-decoration-color: var(--edge-strong); text-underline-offset: 5px; }
   .editable:empty::before { content: attr(data-placeholder); color: var(--muted); pointer-events: none; }
   .editable:focus-visible { outline: none; }
-  .file-meta { display: flex; align-items: center; gap: 10px; margin-top: 14px; color: var(--muted); font-size: 12px; min-width: 0; }
+  .file-meta { display: flex; align-items: center; gap: 10px; margin-top: 6px; color: var(--faint); font-size: 13px; min-width: 0; }
   .filename { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .duration { flex: none; }
-  .remove { position: absolute; right: 0; top: 24px; width: 32px; height: 32px; }
-  .file:first-child .remove { top: 0; }
-  .status { display: flex; align-items: center; gap: 7px; margin: 10px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
-  .status :global(svg), .spinner { flex: none; }
-  .spinner { width: 13px; height: 13px; }
+  .remove { position: absolute; right: -6px; top: 8px; }
+  .file:first-child .remove { top: -4px; }
+  .status { display: flex; align-items: center; gap: 7px; margin: 6px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .status :global(svg) { flex: none; }
   .failed .track-title { color: var(--muted); }
-  .footer { display: grid; gap: 10px; margin-top: 28px; }
-  .note { margin: 0; color: var(--muted); text-align: center; font-size: 12px; }
-  .progress { height: 4px; border-radius: 4px; overflow: hidden; background: var(--raise-2); margin-bottom: 24px; }
-  .progress > div { height: 100%; background: #fff; transform-origin: left; transition: transform .4s var(--ease); }
   @media (max-width: 760px) {
-    .overlay { align-items: flex-end; padding: 0; }
-    .modal { max-width: none; max-height: 92dvh; padding: 28px 20px calc(20px + var(--safe-b)); border-radius: 20px 20px 0 0; }
-    .file { grid-template-columns: 92px minmax(0,1fr); gap: 16px; padding-block: 22px; }
-    .track-title { font-size: 24px; }
-    .author { margin-top: 8px; font-size: 16px; }
-    .info { padding-right: 16px; }
+    .file { grid-template-columns: 72px minmax(0,1fr); gap: 14px; }
+    .info { padding-right: 28px; }
     .files { max-height: 55dvh; }
-    .file-meta { flex-wrap: wrap; gap: 4px 8px; margin-top: 10px; }
+    .file-meta { flex-wrap: wrap; gap: 4px 8px; margin-top: 8px; }
     .filename { max-width: 100%; }
-    .remove { right: -6px; top: 16px; width: 24px; height: 32px; }
+    .remove { right: -6px; top: 14px; }
   }
 </style>

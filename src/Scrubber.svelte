@@ -32,8 +32,9 @@
 
 <style>
   .scrub { position: relative; height: 20px; display: flex; align-items: center; cursor: pointer; touch-action: none; flex: 1; min-width: 0; }
-  .track { position: relative; width: 100%; height: 4px; border-radius: 99px; background: rgba(255,255,255,.14); overflow: hidden; transition: transform .15s; }
-  .fill { height: 100%; background: #fff; border-radius: 99px; }
+  .track { position: relative; width: 100%; height: 4px; border-radius: 99px; background: rgba(255,255,255,.2); overflow: hidden; transition: transform .15s; }
+  .fill { height: 100%; background: var(--text); border-radius: 99px; transition: background .2s; }
+  .scrub:hover .fill, .scrub.dragging .fill { background: var(--accent); }
   .thumb {
     position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: #fff;
     box-shadow: 0 2px 8px rgba(0,0,0,.5); transform: scale(0); transition: transform .15s var(--ease);
